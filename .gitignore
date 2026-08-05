@@ -1,0 +1,26 @@
+node_modules/
+out/
+dist/
+.vite/
+
+# API 키. 앱 첫 실행 시 키체인으로 옮기고 파일에서 지운다 (8.3절).
+.env.local
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+engine/.venv/
+
+# 모델 가중치 — 저장소에 넣지 않는다
+models/
+*.onnx
+*.bin
+*.gguf
+
+# M0 계측 결과
+bench/results/
+
+.DS_Store
+*.log
