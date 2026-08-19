@@ -175,15 +175,35 @@ export function filterForSpeech(text: string): FilterResult {
  * @returns [완성된 문장들, 아직 완성되지 않은 나머지]
  */
 export function takeCompleteSentences(buffer: string): [string[], string] {
+  const TERMINATORS = '.!?…';
   const sentences: string[] = [];
-  const pattern = /[^.!?…\n]*[.!?…]+[\s]*/g;
-  let consumed = 0;
-  let match: RegExpExecArray | null;
+  let start = 0;
 
-  while ((match = pattern.exec(buffer)) !== null) {
-    const sentence = match[0].trim();
+  for (let i = 0; i < buffer.length; i += 1) {
+    const ch = buffer[i] as string;
+    const isNewline = ch === '\n';
+    if (!isNewline && !TERMINATORS.includes(ch)) continue;
+
+    // 연속 종결부호를 모두 삼킨다: "...", "?!"
+    let end = i;
+    if (!isNewline) {
+      while (end + 1 < buffer.length && TERMINATORS.includes(buffer[end + 1] as string)) {
+        end += 1;
+      }
+      // 종결부호 뒤에 공백이 없으면 문장 끝이 아니다.
+      // claude.ai / 3.14 / v1.2 / example.com 이 여기서 걸러진다.
+      const next = buffer[end + 1];
+      if (next === undefined || !/\s/.test(next)) {
+        i = end;
+        continue;
+      }
+    }
+
+    const sentence = buffer.slice(start, end + 1).trim();
     if (sentence) sentences.push(sentence);
-    consumed = match.index + match[0].length;
+    start = end + 1;
+    i = end;
   }
-  return [sentences, buffer.slice(consumed)];
+
+  return [sentences, buffer.slice(start)];
 }

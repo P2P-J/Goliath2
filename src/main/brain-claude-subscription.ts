@@ -152,10 +152,18 @@ export class ClaudeSubscriptionBrain implements Brain {
       const turn = this.turn;
       if (!turn) continue;
 
-      if (message.type === 'assistant') {
+      if (message.type === 'stream_event') {
+        // 토큰 단위 델타. 이것을 읽어야 진짜 스트리밍이다.
+        // assistant 메시지만 읽으면 응답이 통째로 한 번에 와서, 첫 문장까지
+        // 걸리는 시간이 전체 응답 시간과 같아진다 (실측 4913ms vs 4947ms).
+        const event = message.event;
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          this.emit(turn, event.delta.text);
+        }
+      } else if (message.type === 'assistant') {
+        // 완성된 메시지. 텍스트는 이미 델타로 받았으므로 도구만 본다.
         for (const block of message.message.content) {
-          if (block.type === 'text') this.emit(turn, block.text);
-          else if (block.type === 'tool_use') turn.events.onToolUse(block.name);
+          if (block.type === 'tool_use') turn.events.onToolUse(block.name);
         }
       } else if (message.type === 'result') {
         // 종결부호 없이 끝난 마지막 조각을 흘려보낸다.

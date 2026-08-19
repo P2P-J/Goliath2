@@ -40,6 +40,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 웨이크워드 — 학습 전까지 hey_jarvis (9절)
     "wakeWordModel": "hey_jarvis",
     "wakeWordThreshold": 0.5,
+    # 끼어들기 (5.3절)
+    #   에어팟   켬 — 스피커 소리가 마이크로 거의 새지 않는다
+    #   내장 스피커 끔 — 자기 목소리를 되듣고 스스로 끊는다
+    # None 이면 출력 장치를 보고 자동 판단한다.
+    "interruptEnabled": None,
 }
 
 #: 웨이크워드 재감지 억제 시간. 한 번 울리면 잠시 무시한다.
@@ -128,7 +133,7 @@ class Engine:
         if not speaking:
             self._interrupt_fired = False
             return
-        if self._interrupt_fired:
+        if self._interrupt_fired or not self._interrupt_allowed():
             return
         if self._interrupt_vad is None:
             from openwakeword.vad import VAD
@@ -144,6 +149,31 @@ class Engine:
         if float(score) >= 0.6:
             self._interrupt_fired = True
             self.ch.speech(active=True)
+
+    def _interrupt_allowed(self) -> bool:
+        """끼어들기를 켤지 판단한다 (5.3절).
+
+        내장 스피커로 말하면 그 소리가 마이크로 그대로 들어온다. 그러면
+        골리앗이 자기 목소리를 사용자 발화로 오인해 스스로 말을 끊는다.
+        헤드폰·에어팟이면 새는 양이 적어 안전하다.
+        """
+        setting = self.config.get("interruptEnabled")
+        if setting is not None:
+            return bool(setting)
+        return self._output_is_headphones()
+
+    def _output_is_headphones(self) -> bool:
+        """기본 출력이 헤드폰/블루투스인지. 판단이 안 서면 안전하게 False."""
+        try:
+            import sounddevice as sd
+
+            name = str(sd.query_devices(kind="output")["name"]).lower()
+        except Exception:
+            return False
+        # 내장 스피커는 이름에 speaker/내장 이 들어간다.
+        if "speaker" in name or "내장" in name or "macbook" in name:
+            return False
+        return any(k in name for k in ("airpod", "headphone", "buds", "bluetooth", "헤드", "이어"))
 
     def _on_speech_change(self, active: bool) -> None:
         # 수집 중의 발화 시작/끝. 메인은 UI 반응에 쓴다.

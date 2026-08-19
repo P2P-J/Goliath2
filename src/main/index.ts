@@ -166,7 +166,8 @@ function onEngineEvent(event: EngineEvent): void {
       // 부팅음과 함께 창이 열린다. 이미 대화 중이면 그냥 이어간다.
       const startingSession = !state.hasMemory;
       openWindow(false); // 포커스는 훔치지 않는다 (7.2절)
-      sendToRenderer(IPC.playSound, startingSession ? 'boot' : 'wake');
+      // 소리는 세션을 시작할 때만 낸다. 매 턴 효과음이 울리면 시끄럽다.
+      if (startingSession) sendToRenderer(IPC.playSound, 'boot');
       // TODO(M4): 세션 시작이면 음악 재생도 여기서 시작한다.
       engine.send({ type: 'listen.start' });
       state.openListenWindow();
@@ -229,14 +230,9 @@ async function handleUserTurn(text: string): Promise<void> {
   const turn = (turnSeq += 1);
   let spoken = 0;
 
-  // 뇌가 응답하기까지 3초 남짓 걸린다. 침묵이 길면 고장 난 것처럼 느껴지므로
-  // 낮은 맥동을 깔아 '생각 중'으로 읽히게 한다 (6절). 첫 문장이 나오면 멈춘다.
-  const thinkingSound = setTimeout(() => sendToRenderer(IPC.playSound, 'processing'), 700);
-  const stopThinkingSound = () => clearTimeout(thinkingSound);
 
   const events: BrainEvents = {
     onSentence: (sentence) => {
-      stopThinkingSound();
       // 8.2절 이중 방어: 프롬프트가 규칙을 어겨도 여기서 걸러진다.
       const { speech } = filterForSpeech(sentence);
       if (!speech) return;
@@ -255,7 +251,6 @@ async function handleUserTurn(text: string): Promise<void> {
       sendToRenderer(IPC.turnUpdated, { role: 'tool', text: name, done: true });
     },
     onError: (message) => {
-      stopThinkingSound();
       console.error(`[brain] ${message}`);
       sendToRenderer(IPC.playSound, 'error');
       sendToRenderer(IPC.turnUpdated, { role: 'error', text: message, done: true });
@@ -264,7 +259,6 @@ async function handleUserTurn(text: string): Promise<void> {
   };
 
   await brain.ask(text, events);
-  stopThinkingSound();
 
   sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: '', done: true });
 
