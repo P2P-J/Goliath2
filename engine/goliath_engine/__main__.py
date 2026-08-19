@@ -223,6 +223,7 @@ class Engine:
             self.ch.log(
                 f"인식 생략({pre.reason}) 발화 {utterance.speech_sec:.1f}s / "
                 f"전체 {utterance.duration_sec:.1f}s / 비율 {utterance.speech_ratio:.0%}"
+                + (f" / 포화 {utterance.clipped_ratio:.0%}" if utterance.clipped_ratio > 0.02 else "")
             )
             self.ch.transcript("", 0.0, 0, discarded=True, reason=pre.reason)
             return

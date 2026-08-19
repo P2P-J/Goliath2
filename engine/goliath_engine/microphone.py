@@ -39,6 +39,13 @@ VAD_FRAME_SIZE = 640
 VAD_WINDOW = 3          # 최근 몇 프레임을 보는가
 VAD_VOTES = 2           # 그중 몇 개가 발화여야 발화로 보는가
 
+#: 발화 종료 판정. "연속 무음"이 아니라 "최근 창의 발화 밀도"로 본다.
+#:
+#: 연속 무음을 요구하면 산발적 오탐 하나가 카운터를 리셋해 발화가 끝나지
+#: 않는다. 조용한 방에서는 오탐이 0 이라 드러나지 않지만, 소음이 있는 곳에서는
+#: 1.5초 발화가 8~20초로 늘어난다. 밀도로 보면 오탐 하나쯤은 무시된다.
+TAIL_MAX_SPEECH = 1     # 창 안에 발화가 이보다 많으면 아직 말하는 중
+
 #: 웨이크워드가 울린 시점 이전 구간을 얼마나 보관할지.
 #: "골리앗 온라인, 오늘 일정 알려줘" 처럼 이어 말하면 명령의 앞부분이
 #: 이미 지나간 뒤에 감지되므로, 되돌아가 주워야 첫 음절을 잃지 않는다.
@@ -166,6 +173,7 @@ class Utterance:
     duration_sec: float     # 프리롤을 포함한 전체 길이
     speech_sec: float       # 발화로 판정된 구간의 길이 — 판정은 이걸 본다
     speech_ratio: float     # 프리롤 이후 프레임 중 발화 비율
+    clipped_ratio: float    # 포화된 프레임 비율. 높으면 마이크 게인이 과하다
 
 
 class UtteranceCollector:
@@ -182,7 +190,7 @@ class UtteranceCollector:
         self,
         *,
         silence_ms: int = 1200,
-        max_sec: float = 30.0,
+        max_sec: float = 20.0,
         threshold: float = 0.5,
         on_speech_change: Callable[[bool], None] | None = None,
     ) -> None:
@@ -196,9 +204,10 @@ class UtteranceCollector:
 
         self._frames: list[np.ndarray] = []
         self._votes: deque[bool] = deque(maxlen=VAD_WINDOW)
+        self._tail: deque[bool] = deque(maxlen=self._silence_frames)
         self._fed = 0
         self._speech_frames = 0
-        self._trailing_silence = 0
+        self._clipped = 0
         self._speaking = False
         self._active = False
         self._done: Utterance | None = None
@@ -209,9 +218,10 @@ class UtteranceCollector:
         with self._lock:
             self._frames = []
             self._votes.clear()
+            self._tail.clear()
             self._fed = 0
             self._speech_frames = 0
-            self._trailing_silence = 0
+            self._clipped = 0
             self._speaking = False
             self._active = True
             self._done = None
@@ -228,22 +238,29 @@ class UtteranceCollector:
             self._frames.append(frame)
             self._fed += 1
 
+            if np.abs(frame).max() >= 32000:
+                self._clipped += 1
+
             self._votes.append(self._raw_speech(frame))
             # 히스테리시스: 최근 창에서 과반이 발화여야 발화로 본다.
             is_speech = sum(self._votes) >= VAD_VOTES
+            self._tail.append(is_speech)
 
             if is_speech:
                 self._speech_frames += 1
-                self._trailing_silence = 0
                 if not self._speaking:
                     self._speaking = True
                     self._on_speech_change(True)
-            else:
-                self._trailing_silence += 1
 
-            ended = self._speaking and self._trailing_silence >= self._silence_frames
-            too_long = self._fed >= self._max_frames
-            if ended or too_long:
+            # 종료: 최근 창(1.2초)의 발화 밀도가 충분히 낮아지면 끝난다.
+            # 창이 다 차기 전에는 판단하지 않는다.
+            quiet = (
+                len(self._tail) == self._tail.maxlen
+                and sum(self._tail) <= TAIL_MAX_SPEECH
+            )
+            if self._speaking and quiet:
+                self._finish()
+            elif self._fed >= self._max_frames:
                 self._finish()
 
     def _raw_speech(self, frame: np.ndarray) -> bool:
@@ -271,6 +288,7 @@ class UtteranceCollector:
             duration_sec=len(audio) / SAMPLE_RATE,
             speech_sec=self._speech_frames * FRAME_SAMPLES / SAMPLE_RATE,
             speech_ratio=(self._speech_frames / self._fed) if self._fed else 0.0,
+            clipped_ratio=(self._clipped / self._fed) if self._fed else 0.0,
         )
         self._active = False
         if self._speaking:
@@ -288,6 +306,7 @@ class UtteranceCollector:
             self._active = False
             self._frames = []
             self._votes.clear()
+            self._tail.clear()
             if self._speaking:
                 self._speaking = False
                 self._on_speech_change(False)

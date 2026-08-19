@@ -14,6 +14,7 @@ Ctrl-C 로 끝낸다.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -110,15 +111,30 @@ def main() -> None:
                 compression_ratio=result.compression_ratio,
             )
 
+            conf = result.avg_logprob
             print(f"{MARK[verdict.verdict]} [{turn}] {result.text or '(빈 결과)'}")
             print(
-                f"     {utterance.duration_sec:.1f}초 발화 · 발화비율 "
-                f"{utterance.speech_ratio:.0%} · 인식 {total}ms · "
-                f"신뢰도 {result.avg_logprob:.2f}"
-                + (f" · 폐기사유 {verdict.reason}" if verdict.reason else "")
+                f"     수집 {utterance.duration_sec:.1f}s · 발화 "
+                f"{utterance.speech_sec:.1f}s ({utterance.speech_ratio:.0%})"
+                f" · 인식 {total}ms · 신뢰도 "
+                + (f"{conf:.2f}" if conf is not None and math.isfinite(conf) else "—")
+                + (f" · 폐기 {verdict.reason}" if verdict.reason else "")
             )
-            print(f"     최대 입력 레벨 {state['level']:.2f}"
-                  + ("  ⚠ 너무 작습니다 — 마이크를 확인하세요" if state["level"] < 0.02 else ""))
+
+            level = state["level"]
+            notes = []
+            if utterance.clipped_ratio > 0.02:
+                notes.append(
+                    f"⚠ 포화 {utterance.clipped_ratio:.0%} — 시스템 설정 > 사운드 >"
+                    " 입력에서 마이크 볼륨을 낮추세요. 포화된 소리는 VAD 를 속입니다"
+                )
+            elif level > 0.95:
+                notes.append("⚠ 입력이 매우 큽니다 — 마이크 볼륨을 낮춰보세요")
+            elif level < 0.02:
+                notes.append("⚠ 입력이 너무 작습니다 — 마이크를 확인하세요")
+            print(f"     최대 레벨 {level:.2f}")
+            for note in notes:
+                print(f"     {note}")
             state["level"] = 0.0
             print()
 
