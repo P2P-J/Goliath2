@@ -83,6 +83,31 @@ MIN_AVG_LOGPROB = -1.0        # 이보다 낮으면 확신이 없다
 MAX_COMPRESSION_RATIO = 2.4   # 이보다 높으면 같은 말을 반복하고 있다
 
 
+def echo_overlap(spoken: str, heard: str) -> float:
+    """골리앗이 한 말과 들은 말이 얼마나 겹치는지 (0.0~1.0).
+
+    스피커로 나간 소리가 마이크로 돌아오는 것을 막는 마지막 방어선이다.
+    타이밍 유예만으로는 방의 잔향·볼륨에 따라 새는데, 글자를 비교하면
+    음향 조건과 무관하게 걸린다.
+
+    들은 말이 한 말 안에 얼마나 들어 있는지를 본다 — 메아리는 보통
+    한 말의 일부만 잡히기 때문이다.
+    """
+    a, b = _normalize(spoken), _normalize(heard)
+    if not a or not b:
+        return 0.0
+    if b in a:
+        return 1.0
+    # 3글자 조각들이 얼마나 겹치는지
+    grams = {b[i : i + 3] for i in range(len(b) - 2)} or {b}
+    hit = sum(1 for g in grams if g in a)
+    return hit / len(grams)
+
+
+#: 이 비율을 넘으면 자기 목소리의 메아리로 본다.
+ECHO_THRESHOLD = 0.6
+
+
 def _normalize(text: str) -> str:
     """비교용 정규화 — 공백·문장부호·대소문자를 지운다."""
     return re.sub(r"[\s.,!?~…'\"·\-]", "", text).lower()

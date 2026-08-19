@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from typing import Any
 
 import numpy as np
 
 from .audio_fx import FxConfig, VoicePreset
 from .backends import SpeechRequest, default_stt, default_tts
-from .hallucination import Verdict, judge, prejudge
+from .hallucination import ECHO_THRESHOLD, Verdict, echo_overlap, judge, prejudge
 from .microphone import Microphone, UtteranceCollector
 from .protocol import Channel
 
@@ -68,7 +69,7 @@ UTTERANCE_TIMEOUT_SEC = 35.0
 #: 말이 끝난 뒤 귀를 다시 열기까지의 유예.
 #: 스피커 소리가 방에서 반사돼 돌아오는 잔향을 흘려보낸다. 이게 없으면
 #: 마지막 음절의 메아리를 사용자 발화로 오인한다.
-EAR_REOPEN_GUARD_SEC = 0.45
+EAR_REOPEN_GUARD_SEC = 0.6
 
 
 class Engine:
@@ -93,6 +94,8 @@ class Engine:
 
         #: 이 시각 전까지는 마이크 입력을 무시한다 (자기 목소리 잔향).
         self._ear_reopen_at = 0.0
+        #: 최근에 골리앗이 한 말. 메아리를 글자로 걸러내는 데 쓴다.
+        self._recent_speech: deque[str] = deque(maxlen=8)
         #: 마이크가 열려 웨이크워드를 기다리는 중.
         self._armed = False
         #: 청취 창이 열려 있다 — 웨이크워드 없이 바로 명령으로 받는다.
@@ -329,6 +332,15 @@ class Engine:
                 self.ch.error("stt_failed", f"{self.stt.name}: {exc}", fatal=False)
                 continue
 
+            # 자기 목소리의 메아리인가. 타이밍 유예를 뚫고 들어온 것을 잡는다.
+            echo = max(
+                (echo_overlap(said, result.text) for said in self._recent_speech),
+                default=0.0,
+            )
+            if echo >= ECHO_THRESHOLD:
+                self.ch.log(f"메아리 폐기(겹침 {echo:.0%}) {result.text[:40]!r}")
+                continue
+
             verdict = judge(
                 result.text,
                 duration_sec=utterance.duration_sec,
@@ -408,6 +420,7 @@ class Engine:
         speak_id = cmd["id"]
         text = cmd["text"]
         queue = bool(cmd.get("queue"))
+        self._recent_speech.append(text)
 
         with self._lock:
             previous = self._speak_thread
