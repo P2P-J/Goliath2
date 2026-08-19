@@ -4,7 +4,9 @@ import { resolve } from 'node:path';
 import { IPC, type EngineEvent, type GoliathState } from '@shared/protocol';
 import { VoiceEngine } from './engine';
 import { ConversationState } from './state';
-import { Conversation } from './claude';
+import type { Brain, BrainEvents } from './brain';
+import { ClaudeSubscriptionBrain } from './brain-claude-subscription';
+import { ClaudeApiBrain } from './brain-claude-api';
 import { filterForSpeech } from './speech-filter';
 import { KEYS, migrateEnvFile } from './keychain';
 
@@ -21,7 +23,14 @@ let window: BrowserWindow | null = null;
 
 const engine = new VoiceEngine();
 const state = new ConversationState();
-const conversation = new Conversation();
+/**
+ * 뇌 선택 (기획서 4절 원칙 3의 확장).
+ *
+ * 기본값은 구독이다 — 이미 내고 있는 것으로 되므로 추가 비용이 없다.
+ * GOLIATH_BRAIN=api 로 API 키 경로를 쓸 수 있다 (별도 과금, 더 빠름).
+ */
+const brain: Brain =
+  process.env.GOLIATH_BRAIN === 'api' ? new ClaudeApiBrain() : new ClaudeSubscriptionBrain();
 
 /** 이번 턴에 엔진으로 보낸 발화 수. speak 의 id 를 만드는 데 쓴다. */
 let turnSeq = 0;
@@ -168,7 +177,7 @@ function onEngineEvent(event: EngineEvent): void {
       // 말하는 중에 발화가 감지되면 끼어들기 (5.3절).
       if (event.active && state.state === 'speaking') {
         engine.send({ type: 'speak.cancel', id: 'current' });
-        conversation.abort(); // 남은 응답을 계속 생성할 이유가 없다
+        brain.abort(); // 남은 응답을 계속 생성할 이유가 없다
       }
       break;
 
@@ -220,8 +229,14 @@ async function handleUserTurn(text: string): Promise<void> {
   const turn = (turnSeq += 1);
   let spoken = 0;
 
-  await conversation.ask(text, {
+  // 뇌가 응답하기까지 3초 남짓 걸린다. 침묵이 길면 고장 난 것처럼 느껴지므로
+  // 낮은 맥동을 깔아 '생각 중'으로 읽히게 한다 (6절). 첫 문장이 나오면 멈춘다.
+  const thinkingSound = setTimeout(() => sendToRenderer(IPC.playSound, 'processing'), 700);
+  const stopThinkingSound = () => clearTimeout(thinkingSound);
+
+  const events: BrainEvents = {
     onSentence: (sentence) => {
+      stopThinkingSound();
       // 8.2절 이중 방어: 프롬프트가 규칙을 어겨도 여기서 걸러진다.
       const { speech } = filterForSpeech(sentence);
       if (!speech) return;
@@ -240,12 +255,16 @@ async function handleUserTurn(text: string): Promise<void> {
       sendToRenderer(IPC.turnUpdated, { role: 'tool', text: name, done: true });
     },
     onError: (message) => {
-      console.error(`[claude] ${message}`);
+      stopThinkingSound();
+      console.error(`[brain] ${message}`);
       sendToRenderer(IPC.playSound, 'error');
       sendToRenderer(IPC.turnUpdated, { role: 'error', text: message, done: true });
       engine.send({ type: 'speak', id: `t${turn}err`, text: message });
     },
-  });
+  };
+
+  await brain.ask(text, events);
+  stopThinkingSound();
 
   sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: '', done: true });
 
@@ -264,12 +283,15 @@ async function bootstrap(): Promise<void> {
     console.log(`[keychain] 키체인으로 이관: ${migrated.join(', ')} (.env.local 정리 완료)`);
   }
 
-  if (await conversation.connect()) {
-    console.log('[claude] 연결됨');
+  if (await brain.connect()) {
+    console.log(`[brain] ${brain.name} 준비됨`);
   } else {
     console.warn(
-      `[keychain] ${KEYS.anthropic} 없음. .env.local 에 넣고 재시작하세요. ` +
-        '대화만 막히고 귀·입·메뉴바는 동작합니다.',
+      `[brain] ${brain.name} 를 쓸 수 없습니다. ` +
+        (brain.name === 'claude-api'
+          ? `${KEYS.anthropic} 를 .env.local 에 넣고 재시작하세요.`
+          : 'Claude Code 로그인이 필요합니다 (claude 명령으로 확인).') +
+        ' 대화만 막히고 귀·입·메뉴바는 동작합니다.',
     );
   }
 
@@ -290,7 +312,7 @@ async function bootstrap(): Promise<void> {
   });
   state.on('memoryExpired', () => {
     // 8.2절: 기억이 만료되면 새 대화로 시작한다.
-    conversation.reset();
+    brain.reset();
     console.log('[state] 대화 기억 만료 — 다음 발화는 새 대화');
   });
 
@@ -314,7 +336,7 @@ async function bootstrap(): Promise<void> {
 }
 
 function shutdown(): void {
-  void engine.stop().finally(() => {
+  void Promise.all([engine.stop(), brain.dispose()]).finally(() => {
     state.dispose();
     app.exit(0);
   });

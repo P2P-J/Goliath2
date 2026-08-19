@@ -1,12 +1,14 @@
 import Anthropic from '@anthropic-ai/sdk';
 
+import { SYSTEM_PROMPT, type Brain, type BrainEvents } from './brain';
 import { KEYS, getKey } from './keychain';
 import { takeCompleteSentences } from './speech-filter';
 
 /**
- * 뇌 — Claude 대화 관리자.
+ * 뇌 — Claude API 키 뒷단.
  *
- * 기획서 1절: 참조 모델은 클로드 음성 모드다. 턴 기반으로 듣고, 생각하고, 답한다.
+ * 구독을 쓰는 ClaudeSubscriptionBrain 과 달리 별도 과금이 붙는다.
+ * 대신 지연이 짧고 서버측 도구(웹 검색·페치)를 바로 쓸 수 있다.
  *
  * 스트리밍으로 받으면서 문장이 완성되는 대로 흘려보낸다. 응답을 다 기다렸다가
  * 말하면 몇 초를 침묵하게 된다 — 대화가 성립하지 않는다.
@@ -20,42 +22,9 @@ const MODEL = 'claude-opus-5';
  */
 const MAX_HISTORY_TURNS = 40;
 
-const SYSTEM_PROMPT = `당신은 골리앗입니다. 사용자의 맥 데스크톱에서 상시 구동되는 개인 음성 비서입니다.
+export class ClaudeApiBrain implements Brain {
+  readonly name = 'claude-api';
 
-## 대화 방식
-
-당신의 답변은 **소리로 재생되면서 동시에 화면에 글로 표시**됩니다.
-사용자는 말로 묻고, 답을 귀로 듣습니다. 그러니 라디오 진행자처럼 말하세요 —
-읽는 글이 아니라 듣는 말입니다.
-
-- 짧게 답하세요. 한두 문장이면 충분한 것을 문단으로 늘리지 마세요.
-- 서론을 붙이지 마세요. "네, 알겠습니다. 말씀하신 내용은..." 대신 바로 답하세요.
-- 목록을 나열하기보다 요지를 말하세요. 자세한 것은 화면에 있습니다.
-- 마크다운 기호(**, ##, - )를 쓰지 마세요. 소리로 읽으면 의미가 없습니다.
-- 코드는 화면용입니다. 코드를 읽어주지 말고 "작성했습니다"라고 하세요.
-
-## 말투
-
-차분하고 유능한 집사입니다. 과장하지 않고, 아첨하지 않고, 필요한 말만 합니다.
-"말씀하신 파일을 준비해 두었습니다." 같은 톤입니다.
-잘 모르면 모른다고 하세요. 추측을 사실처럼 말하지 마세요.
-
-## 도구
-
-웹 검색이 필요하면 쓰세요. 검색 결과는 **핵심만 말하고**, 출처와 자세한 내용은
-"화면에 정리해 뒀습니다"로 넘기세요. 링크를 소리로 읽지 마세요.`;
-
-export interface ConversationEvents {
-  /** 문장이 완성될 때마다. 음성으로 내보낼 단위다. */
-  onSentence: (sentence: string, index: number) => void;
-  /** 화면 표시용. 스트리밍 중 누적 텍스트가 갱신될 때마다. */
-  onText: (fullText: string) => void;
-  /** 도구를 쓰기 시작했을 때. 상태 표시용. */
-  onToolUse: (name: string) => void;
-  onError: (message: string) => void;
-}
-
-export class Conversation {
   private client: Anthropic | null = null;
   private history: Anthropic.MessageParam[] = [];
   private aborter: AbortController | null = null;
@@ -65,12 +34,9 @@ export class Conversation {
     this.history = [];
   }
 
-  get isReady(): boolean {
-    return this.client !== null;
-  }
-
-  get turnCount(): number {
-    return this.history.length;
+  async dispose(): Promise<void> {
+    this.abort();
+    this.history = [];
   }
 
   async connect(): Promise<boolean> {
@@ -92,7 +58,7 @@ export class Conversation {
    *
    * @returns 화면에 표시할 전문. 중단되면 그때까지 받은 것.
    */
-  async ask(userText: string, events: ConversationEvents): Promise<string> {
+  async ask(userText: string, events: BrainEvents): Promise<string> {
     if (!this.client) {
       events.onError('ANTHROPIC_API_KEY 가 없습니다. .env.local 에 넣고 재시작하세요.');
       return '';
@@ -112,7 +78,7 @@ export class Conversation {
       events.onText(full);
       const [sentences, rest] = takeCompleteSentences(pending);
       pending = rest;
-      for (const sentence of sentences) events.onSentence(sentence, sentenceIndex++);
+      for (const sentence of sentences) { events.onSentence(sentence); sentenceIndex += 1; }
     };
 
     try {
@@ -150,7 +116,7 @@ export class Conversation {
 
       // 마지막 문장이 종결부호 없이 끝났으면 남은 것을 흘려보낸다.
       const tail = pending.trim();
-      if (tail) events.onSentence(tail, sentenceIndex++);
+      if (tail) events.onSentence(tail);
     } catch (error) {
       const err = error as { name?: string; message?: string; status?: number };
       if (err.name === 'AbortError') return full;
