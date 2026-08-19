@@ -74,7 +74,7 @@ def main() -> None:
         if score >= args.threshold:
             state["wake_at"] = now
             print(f"\n🔔 웨이크워드 감지 ({score:.2f})")
-            collector.begin(preroll=mic.preroll())
+            collector.begin(preroll=mic.take_preroll())
 
     mic.subscribe(on_frame)
     mic.start()
@@ -89,7 +89,7 @@ def main() -> None:
                 if args.wake:
                     time.sleep(0.05)
                     continue
-                collector.begin(preroll=mic.preroll())
+                collector.begin(preroll=mic.take_preroll())
 
             utterance = collector.wait(timeout=60.0)
             if utterance is None:

@@ -198,7 +198,7 @@ class Engine:
         if self.collector.is_active:
             return
 
-        self.collector.begin(preroll=self.mic.preroll())
+        self.collector.begin(preroll=self.mic.take_preroll())
         self._listen_thread = threading.Thread(target=self._collect, daemon=True)
         self._listen_thread.start()
 

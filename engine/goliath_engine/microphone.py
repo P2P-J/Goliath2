@@ -49,7 +49,13 @@ TAIL_MAX_SPEECH = 1     # 창 안에 발화가 이보다 많으면 아직 말하
 #: 웨이크워드가 울린 시점 이전 구간을 얼마나 보관할지.
 #: "골리앗 온라인, 오늘 일정 알려줘" 처럼 이어 말하면 명령의 앞부분이
 #: 이미 지나간 뒤에 감지되므로, 되돌아가 주워야 첫 음절을 잃지 않는다.
-PREROLL_SEC = 2.0
+#:
+#: 짧게 잡는 이유: 웨이크워드 감지부터 수집 시작까지의 지연은 수백 ms 다.
+#: 길게 잡으면 직전에 이미 처리한 발화가 다시 들어와, 다음 발화에 지난 말이
+#: 섞여 인식된다 — "안녕" 이라고 말했는데 "반가워" 가 뜨는 증상이 그것이다.
+#: 또 프리롤 길이는 종료 창(1.2초)보다 짧아야 한다. 그렇지 않으면 프리롤을
+#: 넣는 순간 창이 다 차서 즉시 종료 판정이 날 수 있다.
+PREROLL_SEC = 0.6
 
 
 class Microphone:
@@ -84,11 +90,16 @@ class Microphone:
             if consumer in self._consumers:
                 self._consumers.remove(consumer)
 
-    def preroll(self) -> np.ndarray:
-        """최근 PREROLL_SEC 구간. 웨이크워드 감지 직후 되돌아가 주울 때 쓴다."""
+    def take_preroll(self) -> list[np.ndarray]:
+        """링 버퍼를 비우고 프레임들을 돌려준다.
+
+        비우는 것이 핵심이다. 한 번 소비한 소리를 다음 수집에 다시 넣으면
+        직전 발화가 되먹여져 지난 말이 다시 인식된다.
+        """
         with self._lock:
             frames = list(self._preroll)
-        return np.concatenate(frames) if frames else np.zeros(0, dtype=np.int16)
+            self._preroll.clear()
+        return frames
 
     # -- 생명주기 ------------------------------------------------------
 
@@ -213,8 +224,13 @@ class UtteranceCollector:
         self._done: Utterance | None = None
         self._lock = threading.Lock()
 
-    def begin(self, preroll: np.ndarray | None = None) -> None:
-        """수집을 시작한다. preroll 이 있으면 앞에 붙인다."""
+    def begin(self, preroll: list[np.ndarray] | None = None) -> None:
+        """수집을 시작한다.
+
+        preroll 프레임도 일반 프레임과 똑같이 VAD 를 통과시킨다. 앞에 그냥
+        붙이기만 하면 오디오에는 말이 가득한데 발화량이 0 으로 잡혀 무음으로
+        폐기된다.
+        """
         with self._lock:
             self._frames = []
             self._votes.clear()
@@ -226,8 +242,9 @@ class UtteranceCollector:
             self._active = True
             self._done = None
             self._vad.reset_states()
-            if preroll is not None and len(preroll) > 0:
-                self._frames.append(preroll)
+        # 락 밖에서 feed 를 돌린다 — feed 가 스스로 락을 잡는다.
+        for frame in preroll or ():
+            self.feed(frame)
 
     def feed(self, frame: np.ndarray) -> None:
         """마이크 프레임 하나를 넣는다. Microphone.subscribe 에 물린다."""
@@ -323,7 +340,9 @@ class UtteranceCollector:
             if done is not None:
                 return done
             if not self.is_active:
-                return None
+                # 활성 확인과 take 사이에 완료됐을 수 있다. 한 번 더 본다 —
+                # 놓치면 완성된 발화가 조용히 사라진다.
+                return self.take()
             time.sleep(0.02)
         self.abort()
         return None
