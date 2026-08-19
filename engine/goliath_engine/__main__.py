@@ -65,6 +65,11 @@ WAKE_COOLDOWN_SEC = 2.0
 #: 발화 수집 최대 대기.
 UTTERANCE_TIMEOUT_SEC = 35.0
 
+#: 말이 끝난 뒤 귀를 다시 열기까지의 유예.
+#: 스피커 소리가 방에서 반사돼 돌아오는 잔향을 흘려보낸다. 이게 없으면
+#: 마지막 음절의 메아리를 사용자 발화로 오인한다.
+EAR_REOPEN_GUARD_SEC = 0.45
+
 
 class Engine:
     def __init__(self, channel: Channel) -> None:
@@ -86,6 +91,8 @@ class Engine:
         self._interrupt_vad = None
         self._interrupt_fired = False
 
+        #: 이 시각 전까지는 마이크 입력을 무시한다 (자기 목소리 잔향).
+        self._ear_reopen_at = 0.0
         #: 마이크가 열려 웨이크워드를 기다리는 중.
         self._armed = False
         #: 청취 창이 열려 있다 — 웨이크워드 없이 바로 명령으로 받는다.
@@ -119,9 +126,27 @@ class Engine:
     # -- 마이크 소비자 ------------------------------------------------------
 
     def _on_frame(self, frame: np.ndarray) -> None:
-        """모든 마이크 프레임이 지나가는 곳. 가볍게 유지해야 한다."""
+        """모든 마이크 프레임이 지나가는 곳. 가볍게 유지해야 한다.
+
+        **말하는 중에는 수집하지 않는다.** 내장 스피커로 나간 자기 목소리가
+        마이크로 그대로 돌아오기 때문이다. 그것을 수집하면 자기 말을 사용자
+        명령으로 인식해 스스로에게 답하고, 그 답이 다시 들어와 끝없이 돈다.
+
+        헤드폰이면 새는 양이 적으므로 끼어들기 감지만 돌린다.
+        """
+        with self._lock:
+            speaking = self._speaking_id is not None
+
+        if speaking:
+            if self._interrupt_allowed():
+                self._detect_interrupt(frame)
+            return
+
+        # 말이 끝난 직후의 잔향 구간도 흘려보낸다.
+        if time.monotonic() < self._ear_reopen_at:
+            return
+
         self._detect_wake(frame)
-        self._detect_interrupt(frame)
         self.collector.feed(frame)
 
     def _detect_wake(self, frame: np.ndarray) -> None:
@@ -152,7 +177,7 @@ class Engine:
         if not speaking:
             self._interrupt_fired = False
             return
-        if self._interrupt_fired or not self._interrupt_allowed():
+        if self._interrupt_fired:
             return
         if self._interrupt_vad is None:
             from openwakeword.vad import VAD
@@ -393,6 +418,11 @@ class Engine:
             self._speaking_id = speak_id
             self._interrupt_fired = False
 
+        # 말을 시작하면 모으던 것을 버린다. 턴 기반이므로 이 시점의 수집물은
+        # 사용자 발화가 아니라 잡음이거나 앞선 자기 목소리다.
+        if not self._interrupt_allowed():
+            self.collector.abort()
+
         def run() -> None:
             # 앞 발화가 완전히 끝난 뒤 시작한다. 겹치면 스트림이 둘이 되어
             # 두 목소리가 동시에 들린다.
@@ -410,6 +440,13 @@ class Engine:
                 with self._lock:
                     if self._speaking_id == speak_id:
                         self._speaking_id = None
+                        # 잔향이 가라앉을 때까지 귀를 닫아 둔다.
+                        self._ear_reopen_at = time.monotonic() + EAR_REOPEN_GUARD_SEC
+                if not self._interrupt_allowed():
+                    # 재생 내내 링 버퍼가 자기 목소리로 채워졌다. 비우지 않으면
+                    # 다음 수집의 프리롤로 그대로 딸려 들어간다.
+                    self.mic.take_preroll()
+                    self.collector.abort()
             self.ch.speak_end(speak_id, cancelled=not completed)
 
         self._speak_thread = threading.Thread(target=run, daemon=True)
