@@ -10,6 +10,7 @@ stderr 는 로그 전용 — 메인은 파싱하지 않고 그대로 흘린다.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 from typing import Any
@@ -29,8 +30,29 @@ class Channel:
         # 여러 스레드(웨이크워드 감지, VAD, TTS 재생)가 같은 stdout 에 쓴다.
         self._write_lock = threading.Lock()
 
+    @staticmethod
+    def _finite(value: Any) -> Any:
+        """NaN·Infinity 를 None 으로 바꾼다.
+
+        json.dumps 는 기본적으로 NaN 을 그대로 내보내는데, 그것은 JSON 규격이
+        아니라서 JavaScript 의 JSON.parse 가 던진다. Whisper 의 avg_logprob 는
+        인식이 실패하면 NaN 이 되므로 실제로 일어나는 일이다.
+        """
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {k: Channel._finite(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Channel._finite(v) for v in value]
+        return value
+
     def send(self, event: dict[str, Any]) -> None:
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(
+            self._finite(event),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,   # 새어 나가면 조용히 넘기지 말고 터지게 한다
+        )
         with self._write_lock:
             sys.stdout.write(line + "\n")
             sys.stdout.flush()

@@ -28,6 +28,17 @@ SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 1280          # 80ms
 FRAME_MS = FRAME_SAMPLES * 1000 // SAMPLE_RATE
 
+#: Silero VAD 의 내부 조각 크기. 1280 을 정확히 2 로 나눈다.
+#: 480(기본값)은 1280 을 나누지 못해 마지막 조각이 320 으로 잘리고,
+#: predict 가 조각별 점수를 평균내므로 점수가 끌려 내려간다.
+VAD_FRAME_SIZE = 640
+
+#: 히스테리시스. 프레임 하나로 상태가 뒤집히면 주변 소음이 산발적으로 발화로
+#: 잡혀 침묵 카운터를 계속 리셋한다 — 발화가 끝나지 않고, 대부분 소음인
+#: 오디오가 인식기로 넘어간다.
+VAD_WINDOW = 3          # 최근 몇 프레임을 보는가
+VAD_VOTES = 2           # 그중 몇 개가 발화여야 발화로 보는가
+
 #: 웨이크워드가 울린 시점 이전 구간을 얼마나 보관할지.
 #: "골리앗 온라인, 오늘 일정 알려줘" 처럼 이어 말하면 명령의 앞부분이
 #: 이미 지나간 뒤에 감지되므로, 되돌아가 주워야 첫 음절을 잃지 않는다.
@@ -152,8 +163,9 @@ class Microphone:
 @dataclass
 class Utterance:
     audio: np.ndarray       # float32, 16kHz, -1.0~1.0
-    duration_sec: float
-    speech_ratio: float     # 발화로 판정된 프레임 비율
+    duration_sec: float     # 프리롤을 포함한 전체 길이
+    speech_sec: float       # 발화로 판정된 구간의 길이 — 판정은 이걸 본다
+    speech_ratio: float     # 프리롤 이후 프레임 중 발화 비율
 
 
 class UtteranceCollector:
@@ -183,7 +195,9 @@ class UtteranceCollector:
         self._on_speech_change = on_speech_change or (lambda _active: None)
 
         self._frames: list[np.ndarray] = []
-        self._speech_flags: list[bool] = []
+        self._votes: deque[bool] = deque(maxlen=VAD_WINDOW)
+        self._fed = 0
+        self._speech_frames = 0
         self._trailing_silence = 0
         self._speaking = False
         self._active = False
@@ -194,7 +208,9 @@ class UtteranceCollector:
         """수집을 시작한다. preroll 이 있으면 앞에 붙인다."""
         with self._lock:
             self._frames = []
-            self._speech_flags = []
+            self._votes.clear()
+            self._fed = 0
+            self._speech_frames = 0
             self._trailing_silence = 0
             self._speaking = False
             self._active = True
@@ -210,10 +226,14 @@ class UtteranceCollector:
                 return
 
             self._frames.append(frame)
-            is_speech = self._is_speech(frame)
-            self._speech_flags.append(is_speech)
+            self._fed += 1
+
+            self._votes.append(self._raw_speech(frame))
+            # 히스테리시스: 최근 창에서 과반이 발화여야 발화로 본다.
+            is_speech = sum(self._votes) >= VAD_VOTES
 
             if is_speech:
+                self._speech_frames += 1
                 self._trailing_silence = 0
                 if not self._speaking:
                     self._speaking = True
@@ -222,22 +242,21 @@ class UtteranceCollector:
                 self._trailing_silence += 1
 
             ended = self._speaking and self._trailing_silence >= self._silence_frames
-            too_long = len(self._frames) >= self._max_frames
+            too_long = self._fed >= self._max_frames
             if ended or too_long:
                 self._finish()
 
-    def _is_speech(self, frame: np.ndarray) -> bool:
-        """openWakeWord 의 VAD 는 int16 을 먹는다. 정규화하면 안 된다.
+    def _raw_speech(self, frame: np.ndarray) -> bool:
+        """이 프레임 하나에 대한 VAD 판정.
 
-        float32 로 정규화해 넘기면 같은 음성 구간에서 점수가 0.99 → 0.03 으로
-        떨어져 임계값에 절대 닿지 못한다. 발화를 한 번도 감지하지 못하는
-        조용한 실패라 알아내기 어렵다.
+        openWakeWord 의 VAD 는 int16 을 먹는다 — 내부에서 /32767 을 한다.
+        정규화해 넘기면 이중 정규화가 되어 점수가 0.99 → 0.03 으로 떨어진다.
 
-        입력 크기는 1280 샘플 고정이다 — 512/1024/1536/2048 은 모두 ONNX
-        오류가 난다.
+        frame_size 는 1280 을 나누어떨어지게 준다. 기본값 480 은 마지막 조각이
+        320 으로 잘리고, predict 가 조각별 점수를 평균내므로 점수가 낮게 나온다.
         """
         try:
-            score = self._vad.predict(frame)
+            score = self._vad.predict(frame, frame_size=VAD_FRAME_SIZE)
             if isinstance(score, (list, tuple, np.ndarray)):
                 score = float(np.max(score))
             return float(score) >= self._threshold
@@ -247,11 +266,11 @@ class UtteranceCollector:
 
     def _finish(self) -> None:
         audio = np.concatenate(self._frames) if self._frames else np.zeros(0, np.int16)
-        flags = self._speech_flags
         self._done = Utterance(
             audio=audio.astype(np.float32) / 32768.0,
             duration_sec=len(audio) / SAMPLE_RATE,
-            speech_ratio=(sum(flags) / len(flags)) if flags else 0.0,
+            speech_sec=self._speech_frames * FRAME_SAMPLES / SAMPLE_RATE,
+            speech_ratio=(self._speech_frames / self._fed) if self._fed else 0.0,
         )
         self._active = False
         if self._speaking:
@@ -268,7 +287,7 @@ class UtteranceCollector:
         with self._lock:
             self._active = False
             self._frames = []
-            self._speech_flags = []
+            self._votes.clear()
             if self._speaking:
                 self._speaking = False
                 self._on_speech_change(False)

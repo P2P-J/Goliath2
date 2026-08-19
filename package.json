@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "engine": "cd engine && python3 -m goliath_engine"
+    "engine": "cd engine && .venv/bin/python -m goliath_engine",
+    "mic": "cd engine && .venv/bin/python ../bench/mic_test.py"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

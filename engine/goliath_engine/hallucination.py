@@ -54,8 +54,16 @@ BLACKLIST = [
 
 #: 최소 발화 길이. 이보다 짧으면 웨이크워드 잔향이거나 잡음이다.
 MIN_DURATION_SEC = 0.35
-#: 발화로 판정된 프레임 비율의 하한. 대부분이 무음이면 환각 위험이 크다.
-MIN_SPEECH_RATIO = 0.15
+#: 발화로 판정된 구간의 최소 길이. 프리롤과 무음을 뺀 실제 말의 양이다.
+MIN_SPEECH_SEC = 0.4
+#: 발화로 판정된 프레임 비율의 하한.
+#:
+#: 낮게 잡는 이유: 이 비율은 구조적으로 희석된다. 앞쪽 소음 구간과 뒤쪽
+#: 침묵 1.2초가 모두 분모에 들어가므로, 1.5초를 말해도 20% 남짓이 된다.
+#: 실측에서 소음 섞인 정상 발화가 16% 로 나와 임계 15% 에 간신히 걸렸다.
+#: 실제 방어는 MIN_SPEECH_SEC(절대 발화량)과 수집기의 히스테리시스가 한다 —
+#: 소음만 있으면 수집이 시작조차 되지 않는다.
+MIN_SPEECH_RATIO = 0.08
 #: 최소 글자 수 (공백 제외).
 MIN_CHARS = 2
 
@@ -81,6 +89,23 @@ def _is_repetitive(text: str) -> bool:
         if run >= 4:
             return True
     return False
+
+
+def prejudge(
+    *, duration_sec: float, speech_sec: float, speech_ratio: float
+) -> Judgement:
+    """인식 **전** 에 값싼 검사를 먼저 통과시킨다.
+
+    대부분 소음인 오디오를 Whisper 에 넘기면 온도 폴백이 반복되어 4초 발화에
+    10초가 걸린다. 그러고 나온 결과는 어차피 폐기된다. 넘기지 않는 것이 맞다.
+    """
+    if duration_sec < MIN_DURATION_SEC:
+        return Judgement(Verdict.DISCARD, "too_short")
+    if speech_sec < MIN_SPEECH_SEC:
+        return Judgement(Verdict.DISCARD, "too_short")
+    if speech_ratio < MIN_SPEECH_RATIO:
+        return Judgement(Verdict.DISCARD, "silence")
+    return Judgement(Verdict.ACCEPT)
 
 
 def judge(

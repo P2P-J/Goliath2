@@ -17,7 +17,7 @@ import numpy as np
 
 from .audio_fx import FxConfig, VoicePreset
 from .backends import SpeechRequest, default_stt, default_tts
-from .hallucination import Verdict, judge
+from .hallucination import Verdict, judge, prejudge
 from .microphone import Microphone, UtteranceCollector
 from .protocol import Channel
 
@@ -212,6 +212,21 @@ class Engine:
             self.ch.transcript("", 0.0, 0, discarded=True, reason="silence")
             return
 
+        # 값싼 검사를 먼저. 대부분 소음인 오디오를 인식기에 넘기면 온도 폴백이
+        # 돌아 4초 발화에 10초가 걸리고, 결과는 어차피 폐기된다.
+        pre = prejudge(
+            duration_sec=utterance.duration_sec,
+            speech_sec=utterance.speech_sec,
+            speech_ratio=utterance.speech_ratio,
+        )
+        if pre.verdict is not Verdict.ACCEPT:
+            self.ch.log(
+                f"인식 생략({pre.reason}) 발화 {utterance.speech_sec:.1f}s / "
+                f"전체 {utterance.duration_sec:.1f}s / 비율 {utterance.speech_ratio:.0%}"
+            )
+            self.ch.transcript("", 0.0, 0, discarded=True, reason=pre.reason)
+            return
+
         try:
             if not self._stt_loaded:
                 ms = self.stt.load(self.config["whisperModel"])
@@ -244,8 +259,8 @@ class Engine:
             )
         else:
             self.ch.log(
-                f"폐기({verdict.reason}) {utterance.duration_sec:.1f}s "
-                f"발화비율 {utterance.speech_ratio:.0%} · {result.text[:40]!r}"
+                f"폐기({verdict.reason}) 발화 {utterance.speech_sec:.1f}s / "
+                f"비율 {utterance.speech_ratio:.0%} · {result.text[:40]!r}"
             )
             self.ch.transcript(
                 "" if verdict.verdict is Verdict.DISCARD else result.text,
@@ -349,7 +364,23 @@ class Engine:
             self._listen_thread.join(timeout=15.0)
         if self._speak_thread and self._speak_thread.is_alive():
             self._speak_thread.join(timeout=2.0)
+
+        # 정리 순서가 중요하다. 마이크를 먼저 닫아 콜백을 멈추고, 그다음
+        # ONNX 세션 참조를 놓는다. 인터프리터 종료 중에 데몬 스레드가 살아
+        # 있는 채로 세션이 파괴되면 libc++ 가 recursive_mutex 오류로 abort 한다.
         self.mic.stop()
+        self.collector.abort()
+        self._wake_model = None
+        self._interrupt_vad = None
+        try:
+            self.tts.unload()
+            if self._stt_loaded:
+                self.stt.unload()
+        except Exception:
+            pass
+        import gc
+
+        gc.collect()
         self.ch.log("종료")
 
 
