@@ -2,58 +2,81 @@
 <html lang="ko"><head><meta charset="utf-8"><title>골리앗 — 목소리 고르기</title>
 <style>
 :root{color-scheme:dark}
+*{box-sizing:border-box}
 body{margin:0;background:#0b0d10;color:#e6e9ee;
  font:14px/1.65 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif;
- padding:40px 24px 60px}
-.wrap{max-width:760px;margin:0 auto}
-h1{font-size:20px;margin:0 0 6px;letter-spacing:.02em}
-.sub{color:#8b95a3;margin:0 0 28px;font-size:13px}
+ padding:44px 24px 80px}
+.wrap{max-width:780px;margin:0 auto}
+h1{font-size:21px;margin:0 0 6px;letter-spacing:.02em}
+.sub{color:#8b95a3;margin:0 0 26px;font-size:13px}
 .lines{background:#12161c;border:1px solid #1e242c;border-radius:8px;
- padding:12px 16px;margin:0 0 30px;color:#aab4c2;font-size:13px}
-.lines b{color:#e6e9ee;font-weight:600}
-h2{font-size:13px;color:#7f8a99;margin:30px 0 12px;letter-spacing:.08em;
- text-transform:uppercase;font-weight:600}
-.row{display:flex;align-items:center;gap:14px;padding:11px 14px;
- border:1px solid #1a1f26;border-radius:8px;margin-bottom:8px;background:#0f1318}
-.row.pick{border-color:#2d5a44;background:#0f1a15}
-.name{width:88px;font-weight:600;font-family:ui-monospace,SFMono-Regular,monospace}
-.tag{font-size:11px;color:#c9a227;border:1px solid #4a3f1a;padding:1px 7px;
- border-radius:99px;white-space:nowrap}
-audio{flex:1;height:34px}
-.note{margin-top:34px;padding:14px 16px;background:#12161c;
+ padding:13px 16px;margin:0 0 34px;color:#aab4c2;font-size:13px}
+.lines b{color:#e6e9ee;font-weight:600;margin-right:6px}
+h2{font-size:12px;color:#7f8a99;margin:34px 0 4px;letter-spacing:.1em;
+ text-transform:uppercase;font-weight:700}
+.desc{color:font-size:12.5px;margin:0 0 13px;color:#6b7684}
+.row{display:flex;align-items:center;gap:13px;padding:10px 14px;
+ border:1px solid #1a1f26;border-radius:8px;margin-bottom:7px;background:#0f1318}
+.row.hero{border-color:#2d5a44;background:#0e1a15}
+.name{width:104px;font-weight:600;font-size:12.5px;flex-shrink:0;
+ font-family:ui-monospace,SFMono-Regular,monospace}
+audio{flex:1;height:34px;min-width:0}
+.note{margin-top:38px;padding:15px 17px;background:#12161c;
  border-left:3px solid #2d5a44;border-radius:0 6px 6px 0;color:#aab4c2;font-size:13px}
+.note b{color:#e6e9ee}
+code{background:#1a1f26;padding:1px 6px;border-radius:4px;font-size:12px;
+ font-family:ui-monospace,SFMono-Regular,monospace}
+table{width:100%;border-collapse:collapse;margin:12px 0 0;font-size:12.5px}
+td,th{padding:6px 10px;border-bottom:1px solid #1a1f26;text-align:left}
+th{color:#7f8a99;font-weight:600}
 </style></head><body><div class="wrap">
+
 <h1>골리앗 — 목소리 고르기</h1>
-<p class="sub">수퍼토닉 기본 보이스 10종 · 이 맥에서 직접 합성 · 스텝 8 (실제 앱에서 나올 소리 그대로)</p>
+<p class="sub">수퍼토닉 · 이 맥에서 직접 합성 · 스텝 8 · 말 속도 1.35배 (효과판)</p>
 
 <div class="lines">
- <b>대사 1</b> 골리앗 온라인. 명령을 기다리고 있습니다.<br>
- <b>대사 2</b> 말씀하신 파일을 준비해 두었습니다. 확인해 보시겠습니까?
+ <b>1</b> 골리앗 온라인. 명령을 기다리고 있습니다.<br>
+ <b>2</b> 말씀하신 파일을 준비해 두었습니다. 확인해 보시겠습니까?
 </div>
 
-<h2>남성 · 저음 튜닝판 — 골리앗/자비스 후보</h2>
-<div id="deep"></div>
+<h2>골리앗 프리셋</h2>
+<p class="desc">무전기 대역 제한(300–3400Hz) · 회로 새추레이션 · 링 변조 · 슬랩백 · 노이즈 플로어 · 음높이 −2.3반음</p>
+<div id="goliath"></div>
 
-<h2>남성 · 원본</h2>
-<div id="male"></div>
+<h2>자비스 프리셋</h2>
+<p class="desc">저역 정리 · 프레즌스 부스트 · 공기감 · 짧은 잔향 · 음높이 −1.2반음. 깨끗하고 다듬어진 쪽</p>
+<div id="jarvis"></div>
 
-<h2>여성 · 원본</h2>
-<div id="female"></div>
+<h2>말 속도 비교 <span style="color:#4b5563;text-transform:none;letter-spacing:0">— M3 · 골리앗</span></h2>
+<p class="desc">수퍼토닉 기본값은 1.05입니다. 대화용으로 어느 정도가 편한지 골라주세요</p>
+<div id="speed"></div>
+
+<h2>원본 <span style="color:#4b5563;text-transform:none;letter-spacing:0">— 효과 없음 · 기본 속도</span></h2>
+<p class="desc">비교 기준</p>
+<div id="plain"></div>
 
 <div class="note">
- <b>저음 튜닝판</b>은 약 2.3반음 낮춘 것입니다. 수퍼토닉에 음높이 파라미터가 없어서,
- 빠르게 합성한 뒤 느리게 재생하는 방식으로 만들었습니다. 길이는 원본과 같습니다.<br><br>
- 더 낮추거나 덜 낮추는 것, 말 속도를 늦추는 것 모두 조절할 수 있습니다.
- 마음에 드는 번호와 "조금 더 낮게 / 조금 더 느리게" 같은 방향만 알려주시면 다시 만들어 드립니다.
+ <b>두 손잡이는 별개입니다.</b>
+ <table>
+  <tr><th>손잡이</th><th>지금 값</th><th>범위</th><th>바꾸면</th></tr>
+  <tr><td><code>speed</code></td><td>1.35</td><td>0.7 ~ 2.0</td><td>말이 빨라짐/느려짐</td></tr>
+  <tr><td><code>pitch_factor</code></td><td>골리앗 1.14 · 자비스 1.07</td><td>1.0 ~ 1.3</td><td>목소리가 낮아짐 (길이는 그대로)</td></tr>
+  <tr><td><code>intensity</code></td><td>1.0</td><td>0.0 ~ 1.0</td><td>효과가 세짐/옅어짐</td></tr>
+  <tr><td><code>steps</code></td><td>8</td><td>5 ~ 12</td><td>또렷해짐 (느려짐)</td></tr>
+ </table>
+ <br>
+ 마음에 드는 <b>번호</b>와 <b>방향</b>만 주시면 다시 만들어 드립니다.
+ 예: <code>M4-goliath, 효과는 조금만 옅게, 속도 1.45</code>
 </div>
+
 </div>
 <script>
-const mk = (id, list, pick) => document.getElementById(id).innerHTML = list.map(v =>
- `<div class="row${pick && pick.includes(v) ? ' pick' : ''}">
-    <span class="name">${v}</span>
-    <audio controls preload="none" src="voices/${v}.wav"></audio>
-  </div>`).join('');
-mk('deep', ['M1-deep','M2-deep','M3-deep','M4-deep','M5-deep']);
-mk('male', ['M1','M2','M3','M4','M5']);
-mk('female', ['F1','F2','F3','F4','F5']);
+const mk=(id,list,hero)=>document.getElementById(id).innerHTML=list.map(([f,label])=>
+ `<div class="row${hero?' hero':''}"><span class="name">${label}</span>
+   <audio controls preload="none" src="voices/${f}.wav"></audio></div>`).join('');
+const M=['M1','M2','M3','M4','M5'];
+mk('goliath',M.map(v=>[`${v}-goliath`,v]),true);
+mk('jarvis', M.map(v=>[`${v}-jarvis`,v]));
+mk('speed',[['speed-1.15','1.15배'],['speed-1.35','1.35배'],['speed-1.45','1.45배']]);
+mk('plain',[...M,'F1','F2','F3','F4','F5'].map(v=>[v,v]));
 </script></body></html>
