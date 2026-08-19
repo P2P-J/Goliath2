@@ -4,7 +4,9 @@ import { resolve } from 'node:path';
 import { IPC, type EngineEvent, type GoliathState } from '@shared/protocol';
 import { VoiceEngine } from './engine';
 import { ConversationState } from './state';
-import { KEYS, getKey, migrateEnvFile } from './keychain';
+import { Conversation } from './claude';
+import { filterForSpeech } from './speech-filter';
+import { KEYS, migrateEnvFile } from './keychain';
 
 /**
  * 골리앗 메인 프로세스.
@@ -19,6 +21,10 @@ let window: BrowserWindow | null = null;
 
 const engine = new VoiceEngine();
 const state = new ConversationState();
+const conversation = new Conversation();
+
+/** 이번 턴에 엔진으로 보낸 발화 수. speak 의 id 를 만드는 데 쓴다. */
+let turnSeq = 0;
 
 /** 메뉴바 아이콘이 표시하는 상태 (4.1절). */
 const STATE_LABEL: Record<GoliathState, string> = {
@@ -45,10 +51,20 @@ const STATE_GLYPH: Record<GoliathState, string> = {
 // 창 — 명시적으로 열 때만 (4.1절)
 // ---------------------------------------------------------------------------
 
-function openWindow(): void {
+/**
+ * 창을 연다.
+ *
+ * @param steal 포커스를 가져올지. 웨이크워드로 깨어날 때는 false —
+ *   기획서 7.2절: 창은 열리되 타이핑하던 곳에서 커서를 빼앗지 않는다.
+ */
+function openWindow(steal = true): void {
   if (window) {
-    window.show();
-    window.focus();
+    if (steal) {
+      window.show();
+      window.focus();
+    } else {
+      window.showInactive();
+    }
     return;
   }
 
@@ -68,7 +84,7 @@ function openWindow(): void {
     },
   });
 
-  window.on('ready-to-show', () => window?.show());
+  window.on('ready-to-show', () => (steal ? window?.show() : window?.showInactive()));
   window.on('closed', () => {
     window = null;
   });
@@ -136,28 +152,33 @@ function onEngineEvent(event: EngineEvent): void {
       state.transition('idle');
       break;
 
-    case 'wake':
-      sendToRenderer(IPC.playSound, 'wake');
+    case 'wake': {
+      // 7.1절 기동 경험. 대기에서 깨어난 것이면 세션 시작 —
+      // 부팅음과 함께 창이 열린다. 이미 대화 중이면 그냥 이어간다.
+      const startingSession = !state.hasMemory;
+      openWindow(false); // 포커스는 훔치지 않는다 (7.2절)
+      sendToRenderer(IPC.playSound, startingSession ? 'boot' : 'wake');
+      // TODO(M4): 세션 시작이면 음악 재생도 여기서 시작한다.
       engine.send({ type: 'listen.start' });
       state.openListenWindow();
       break;
+    }
 
     case 'speech':
-      // 말하는 중에 발화가 감지되면 끼어들기 (2.3절).
+      // 말하는 중에 발화가 감지되면 끼어들기 (5.3절).
       if (event.active && state.state === 'speaking') {
         engine.send({ type: 'speak.cancel', id: 'current' });
+        conversation.abort(); // 남은 응답을 계속 생성할 이유가 없다
       }
       break;
 
     case 'transcript':
       if (event.discarded) {
-        // 5.3절 환각 방지에 걸린 것. 조용히 대기로 돌아간다.
-        state.transition('idle');
+        // 8.5절 환각 방지에 걸린 것. 조용히 대기로 돌아간다.
+        if (state.state !== 'speaking') state.transition('idle');
         break;
       }
-      state.transition('working');
-      sendToRenderer(IPC.turnUpdated, { role: 'user', text: event.text });
-      // TODO(M1): Claude API 호출 → TTS 후처리 필터(3.3절) → engine.send({type:'speak'})
+      void handleUserTurn(event.text);
       break;
 
     case 'speak.begin':
@@ -186,6 +207,52 @@ function onEngineEvent(event: EngineEvent): void {
   }
 }
 
+/**
+ * 사용자 발화 한 턴을 처리한다.
+ *
+ * 인식 → Claude → 필터 → 음성. 스트리밍이라 문장이 완성되는 대로 말하기
+ * 시작한다. 응답을 다 기다렸다가 말하면 몇 초를 침묵한다.
+ */
+async function handleUserTurn(text: string): Promise<void> {
+  state.transition('working');
+  sendToRenderer(IPC.turnUpdated, { role: 'user', text, done: true });
+
+  const turn = (turnSeq += 1);
+  let spoken = 0;
+
+  await conversation.ask(text, {
+    onSentence: (sentence) => {
+      // 8.2절 이중 방어: 프롬프트가 규칙을 어겨도 여기서 걸러진다.
+      const { speech } = filterForSpeech(sentence);
+      if (!speech) return;
+      engine.send({
+        type: 'speak',
+        id: `t${turn}s${spoken}`,
+        text: speech,
+        queue: spoken > 0, // 첫 문장만 앞을 밀어내고, 이후는 이어 말한다
+      });
+      spoken += 1;
+    },
+    onText: (fullText) => {
+      sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: fullText, done: false });
+    },
+    onToolUse: (name) => {
+      sendToRenderer(IPC.turnUpdated, { role: 'tool', text: name, done: true });
+    },
+    onError: (message) => {
+      console.error(`[claude] ${message}`);
+      sendToRenderer(IPC.playSound, 'error');
+      sendToRenderer(IPC.turnUpdated, { role: 'error', text: message, done: true });
+      engine.send({ type: 'speak', id: `t${turn}err`, text: message });
+    },
+  });
+
+  sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: '', done: true });
+
+  // 말할 것이 없었으면 (필터가 전부 걷어냈거나 빈 응답) 대화를 닫는다.
+  if (spoken === 0 && state.state === 'working') state.openListenWindow();
+}
+
 // ---------------------------------------------------------------------------
 // 기동
 // ---------------------------------------------------------------------------
@@ -197,11 +264,12 @@ async function bootstrap(): Promise<void> {
     console.log(`[keychain] 키체인으로 이관: ${migrated.join(', ')} (.env.local 정리 완료)`);
   }
 
-  const anthropicKey = await getKey(KEYS.anthropic);
-  if (!anthropicKey) {
+  if (await conversation.connect()) {
+    console.log('[claude] 연결됨');
+  } else {
     console.warn(
       `[keychain] ${KEYS.anthropic} 없음. .env.local 에 넣고 재시작하세요. ` +
-        '대화 기능만 막히고 나머지는 동작합니다.',
+        '대화만 막히고 귀·입·메뉴바는 동작합니다.',
     );
   }
 
@@ -220,7 +288,11 @@ async function bootstrap(): Promise<void> {
     engine.send({ type: 'listen.stop' });
     sendToRenderer(IPC.playSound, 'idle-return');
   });
-  state.on('memoryExpired', () => console.log('[state] 대화 기억 만료 — 다음 발화는 새 대화'));
+  state.on('memoryExpired', () => {
+    // 8.2절: 기억이 만료되면 새 대화로 시작한다.
+    conversation.reset();
+    console.log('[state] 대화 기억 만료 — 다음 발화는 새 대화');
+  });
 
   engine.on('event', onEngineEvent);
   engine.on('fault', (message: string) => console.error(`[engine:fault] ${message}`));

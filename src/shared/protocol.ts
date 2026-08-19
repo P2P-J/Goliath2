@@ -17,7 +17,7 @@
  * PROTOCOL_VERSION 을 올려야 한다. 불일치는 앱 시작 시 감지된다.
  */
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // 상태 (기획서 2.1절 상태 전이)
@@ -76,7 +76,19 @@ export type EngineCommand =
    * 말하기. text 는 TTS 후처리 필터를 이미 통과한 문장이다 (3.3절 이중 방어).
    * 필터는 메인 프로세스가 담당한다 — 엔진은 받은 걸 그대로 읽는다.
    */
-  | { type: 'speak'; id: string; text: string }
+  | {
+      type: 'speak';
+      id: string;
+      text: string;
+      /**
+       * true 면 앞 발화를 끊지 않고 뒤에 이어 말한다.
+       *
+       * Claude 응답을 스트리밍으로 받으면서 문장이 완성될 때마다 보내려면
+       * 필요하다. 기본값(false)은 앞 발화를 밀어내는 '교체' 의미다 —
+       * 사용자가 새 명령을 내렸을 때가 그 경우다.
+       */
+      queue?: boolean;
+    }
   /** 말하기 중단. 끼어들기(2.3절)와 사용자 취소 양쪽에서 쓴다. */
   | { type: 'speak.cancel'; id: string }
 

@@ -275,10 +275,13 @@ class Engine:
         """말하기. 재생은 별도 스레드에서 — 명령 루프가 막히면 취소를 못 받는다."""
         speak_id = cmd["id"]
         text = cmd["text"]
+        queue = bool(cmd.get("queue"))
 
         with self._lock:
             previous = self._speak_thread
-            if self._speaking_id is not None:
+            # queue 면 앞 발화를 끝까지 두고 뒤에 붙는다. Claude 응답을
+            # 문장 단위로 흘려보낼 때 쓴다 — 매번 취소하면 첫 문장만 들린다.
+            if self._speaking_id is not None and not queue:
                 self.tts.cancel()
             self._speaking_id = speak_id
             self._interrupt_fired = False
@@ -287,7 +290,7 @@ class Engine:
             # 앞 발화가 완전히 끝난 뒤 시작한다. 겹치면 스트림이 둘이 되어
             # 두 목소리가 동시에 들린다.
             if previous is not None and previous.is_alive():
-                previous.join(timeout=3.0)
+                previous.join(timeout=60.0 if queue else 3.0)
             try:
                 completed = self.tts.speak(
                     self._speech_request(text),

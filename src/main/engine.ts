@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import { createInterface, type Interface } from 'node:readline';
 import { resolve } from 'node:path';
 
@@ -19,6 +20,20 @@ import {
  *
  * 오디오는 여기를 지나가지 않는다 (기획서 10절 원칙 1).
  */
+/**
+ * 음성 엔진이 쓸 파이썬을 고른다.
+ *
+ * 시스템 파이썬에는 numpy·수퍼토닉·Whisper 가 없다. engine/.venv 가 있으면
+ * 그것을 쓴다 — 없으면 시스템 파이썬으로 떨어지고, 그때는 의존성 오류가
+ * 그대로 드러나는 편이 낫다.
+ */
+function resolvePython(engineDir: string): string {
+  const override = process.env.GOLIATH_PYTHON;
+  if (override) return override;
+  const venv = resolve(engineDir, '.venv/bin/python');
+  return existsSync(venv) ? venv : 'python3';
+}
+
 export class VoiceEngine extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private reader: Interface | null = null;
@@ -31,8 +46,8 @@ export class VoiceEngine extends EventEmitter {
   private static readonly RESTART_BACKOFF_MS = 1_000;
 
   constructor(
-    private readonly pythonPath = process.env.GOLIATH_PYTHON ?? 'python3',
     private readonly engineDir = resolve(process.cwd(), 'engine'),
+    private readonly pythonPath = resolvePython(engineDir),
   ) {
     super();
   }
