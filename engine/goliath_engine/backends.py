@@ -300,7 +300,10 @@ def default_tts() -> TtsBackend:
 @dataclass
 class Transcription:
     text: str
-    confidence: float
+    #: Whisper 가 내는 신호들. 환각 판정에 쓴다 (8.5절 ④).
+    no_speech_prob: float | None
+    avg_logprob: float | None
+    compression_ratio: float | None
     latency_ms: int
 
 
@@ -308,41 +311,120 @@ class SttBackend(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def load(self, model: str) -> int: ...
+    def is_available(self) -> bool: ...
+
+    @abstractmethod
+    def load(self, model: str) -> int:
+        """모델을 올리고 걸린 시간(ms)을 돌려준다."""
 
     @abstractmethod
     def unload(self) -> None: ...
 
     @abstractmethod
-    def transcribe(self, audio: bytes, *, language: str, hints: list[str]) -> Transcription:
-        """hints 는 5.2절 개발 용어 힌트(initial prompt)로 넘긴다."""
+    def transcribe(
+        self, audio: np.ndarray, *, language: str, hints: str | None
+    ) -> Transcription:
+        """audio 는 16kHz float32 모노 (-1.0~1.0)."""
 
 
 class MlxWhisperBackend(SttBackend):
-    """Apple Silicon Metal 가속. 맥에서 기본값."""
+    """Apple Silicon Metal 가속. 맥에서 기본값.
+
+    실측 (M2 Air, 24초 한국어 샘플, 용어 힌트 있음)
+      medium          RTF 0.122 · CER 0.8%   ← 채택
+      large-v3-turbo  RTF 0.080 · CER 2.5%
+      small           RTF 0.043 · CER 2.5%
+      large-v3        RTF 1.812 — 실격. 발화보다 인식이 오래 걸린다.
+
+    힌트 주입 효과가 극적이다: medium 은 힌트 없이 CER 38.8%, 있으면 0.8%.
+    옵션이 아니라 필수다 (5.2절).
+    """
 
     name = "mlx-whisper"
 
+    #: 모델 이름 → mlx-community 저장소.
+    REPOS = {
+        "small": "mlx-community/whisper-small-mlx",
+        "medium": "mlx-community/whisper-medium-mlx",
+        "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+        "large-v3": "mlx-community/whisper-large-v3-mlx",
+    }
+
+    def __init__(self) -> None:
+        self._repo: str | None = None
+
+    def is_available(self) -> bool:
+        try:
+            import mlx_whisper  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
     def load(self, model: str) -> int:
-        raise NotImplementedError("M1")
+        """mlx_whisper 는 명시적 로드가 없다 — 첫 추론에 올라온다.
+
+        여기서는 저장소만 확정하고, 짧은 무음으로 한 번 돌려 예열한다.
+        예열하지 않으면 첫 발화에서만 몇 초가 더 걸린다.
+        """
+        import mlx_whisper
+
+        repo = self.REPOS.get(model)
+        if repo is None:
+            raise ValueError(f"알 수 없는 Whisper 모델: {model}")
+
+        t0 = time.perf_counter()
+        self._repo = repo
+        mlx_whisper.transcribe(
+            np.zeros(16_000, dtype=np.float32), path_or_hf_repo=repo, language="ko"
+        )
+        return int((time.perf_counter() - t0) * 1000)
 
     def unload(self) -> None:
-        raise NotImplementedError("M1")
+        # mlx 는 가중치를 통합 메모리에 매핑해 둔다. 참조를 놓고 GC 를 돌린다.
+        self._repo = None
+        import gc
 
-    def transcribe(self, audio: bytes, *, language: str, hints: list[str]) -> Transcription:
-        raise NotImplementedError("M1")
+        gc.collect()
+
+    def transcribe(
+        self, audio: np.ndarray, *, language: str, hints: str | None
+    ) -> Transcription:
+        import mlx_whisper
+
+        if self._repo is None:
+            raise RuntimeError("모델이 로드되지 않았습니다")
+
+        t0 = time.perf_counter()
+        out = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self._repo,
+            language=language,
+            initial_prompt=hints or None,
+        )
+        latency = int((time.perf_counter() - t0) * 1000)
+
+        # 신호는 세그먼트별로 나온다. 가장 나쁜 값을 대표로 쓴다 —
+        # 한 구간이라도 수상하면 의심하는 것이 안전하다.
+        segments = out.get("segments") or []
+
+        def worst(key: str, pick):
+            values = [s[key] for s in segments if s.get(key) is not None]
+            return pick(values) if values else None
+
+        return Transcription(
+            text=(out.get("text") or "").strip(),
+            no_speech_prob=worst("no_speech_prob", max),
+            avg_logprob=worst("avg_logprob", min),
+            compression_ratio=worst("compression_ratio", max),
+            latency_ms=latency,
+        )
 
 
-class FasterWhisperBackend(SttBackend):
-    """CTranslate2. CPU/CUDA. 데스크톱·리눅스에서 기본값."""
-
-    name = "faster-whisper"
-
-    def load(self, model: str) -> int:
-        raise NotImplementedError("M1")
-
-    def unload(self) -> None:
-        raise NotImplementedError("M1")
-
-    def transcribe(self, audio: bytes, *, language: str, hints: list[str]) -> Transcription:
-        raise NotImplementedError("M1")
+def default_stt() -> SttBackend:
+    backend = MlxWhisperBackend()
+    if not backend.is_available():
+        raise RuntimeError(
+            "mlx-whisper 를 찾을 수 없습니다. Apple Silicon 이 아니면 "
+            "faster-whisper 뒷단이 필요합니다 (미구현)."
+        )
+    return backend

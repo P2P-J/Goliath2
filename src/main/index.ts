@@ -214,7 +214,12 @@ async function bootstrap(): Promise<void> {
     sendToRenderer(IPC.stateChanged, next);
   });
   state.on('releaseModels', () => engine.send({ type: 'models.release' }));
-  state.on('listenWindowExpired', () => sendToRenderer(IPC.playSound, 'idle-return'));
+  state.on('listenWindowExpired', () => {
+    // 상태 기계는 메인이 소유한다. 창이 닫혔으면 엔진의 발화 수집도 멈춰야
+    // 한다 — 알리지 않으면 엔진이 자체 타임아웃까지 혼자 기다린다.
+    engine.send({ type: 'listen.stop' });
+    sendToRenderer(IPC.playSound, 'idle-return');
+  });
   state.on('memoryExpired', () => console.log('[state] 대화 기억 만료 — 다음 발화는 새 대화'));
 
   engine.on('event', onEngineEvent);
