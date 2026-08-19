@@ -24,3 +24,6 @@ bench/results/
 
 .DS_Store
 *.log
+
+# 보이스 샘플 — bench/make_voice_samples.py 로 재생성 가능 (용량이 큼)
+samples/voices/

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>골리앗 — 목소리 고르기</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d10;color:#e6e9ee;
+ font:14px/1.65 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif;
+ padding:40px 24px 60px}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:20px;margin:0 0 6px;letter-spacing:.02em}
+.sub{color:#8b95a3;margin:0 0 28px;font-size:13px}
+.lines{background:#12161c;border:1px solid #1e242c;border-radius:8px;
+ padding:12px 16px;margin:0 0 30px;color:#aab4c2;font-size:13px}
+.lines b{color:#e6e9ee;font-weight:600}
+h2{font-size:13px;color:#7f8a99;margin:30px 0 12px;letter-spacing:.08em;
+ text-transform:uppercase;font-weight:600}
+.row{display:flex;align-items:center;gap:14px;padding:11px 14px;
+ border:1px solid #1a1f26;border-radius:8px;margin-bottom:8px;background:#0f1318}
+.row.pick{border-color:#2d5a44;background:#0f1a15}
+.name{width:88px;font-weight:600;font-family:ui-monospace,SFMono-Regular,monospace}
+.tag{font-size:11px;color:#c9a227;border:1px solid #4a3f1a;padding:1px 7px;
+ border-radius:99px;white-space:nowrap}
+audio{flex:1;height:34px}
+.note{margin-top:34px;padding:14px 16px;background:#12161c;
+ border-left:3px solid #2d5a44;border-radius:0 6px 6px 0;color:#aab4c2;font-size:13px}
+</style></head><body><div class="wrap">
+<h1>골리앗 — 목소리 고르기</h1>
+<p class="sub">수퍼토닉 기본 보이스 10종 · 이 맥에서 직접 합성 · 스텝 8 (실제 앱에서 나올 소리 그대로)</p>
+
+<div class="lines">
+ <b>대사 1</b> 골리앗 온라인. 명령을 기다리고 있습니다.<br>
+ <b>대사 2</b> 말씀하신 파일을 준비해 두었습니다. 확인해 보시겠습니까?
+</div>
+
+<h2>남성 · 저음 튜닝판 — 골리앗/자비스 후보</h2>
+<div id="deep"></div>
+
+<h2>남성 · 원본</h2>
+<div id="male"></div>
+
+<h2>여성 · 원본</h2>
+<div id="female"></div>
+
+<div class="note">
+ <b>저음 튜닝판</b>은 약 2.3반음 낮춘 것입니다. 수퍼토닉에 음높이 파라미터가 없어서,
+ 빠르게 합성한 뒤 느리게 재생하는 방식으로 만들었습니다. 길이는 원본과 같습니다.<br><br>
+ 더 낮추거나 덜 낮추는 것, 말 속도를 늦추는 것 모두 조절할 수 있습니다.
+ 마음에 드는 번호와 "조금 더 낮게 / 조금 더 느리게" 같은 방향만 알려주시면 다시 만들어 드립니다.
+</div>
+</div>
+<script>
+const mk = (id, list, pick) => document.getElementById(id).innerHTML = list.map(v =>
+ `<div class="row${pick && pick.includes(v) ? ' pick' : ''}">
+    <span class="name">${v}</span>
+    <audio controls preload="none" src="voices/${v}.wav"></audio>
+  </div>`).join('');
+mk('deep', ['M1-deep','M2-deep','M3-deep','M4-deep','M5-deep']);
+mk('male', ['M1','M2','M3','M4','M5']);
+mk('female', ['F1','F2','F3','F4','F5']);
+</script></body></html>
