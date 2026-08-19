@@ -201,13 +201,17 @@ function onEngineEvent(event: EngineEvent): void {
       break;
 
     case 'device':
-      // 5.4절: 장치 변경 시 짧은 효과음으로 알린다.
-      sendToRenderer(IPC.playSound, 'device-switch');
+      // 장치 변경은 화면으로만 알린다.
+      sendToRenderer(IPC.turnUpdated, {
+        role: 'tool',
+        text: `출력 장치: ${event.output}`,
+        done: true,
+      });
       break;
 
     case 'error':
-      sendToRenderer(IPC.playSound, 'error');
       console.error(`[engine:${event.code}] ${event.message}`);
+      sendToRenderer(IPC.turnUpdated, { role: 'error', text: event.message, done: true });
       break;
 
     case 'model':
@@ -252,7 +256,6 @@ async function handleUserTurn(text: string): Promise<void> {
     },
     onError: (message) => {
       console.error(`[brain] ${message}`);
-      sendToRenderer(IPC.playSound, 'error');
       sendToRenderer(IPC.turnUpdated, { role: 'error', text: message, done: true });
       engine.send({ type: 'speak', id: `t${turn}err`, text: message });
     },
@@ -299,10 +302,9 @@ async function bootstrap(): Promise<void> {
   });
   state.on('releaseModels', () => engine.send({ type: 'models.release' }));
   state.on('listenWindowExpired', () => {
-    // 상태 기계는 메인이 소유한다. 창이 닫혔으면 엔진의 발화 수집도 멈춰야
-    // 한다 — 알리지 않으면 엔진이 자체 타임아웃까지 혼자 기다린다.
+    // 상태 기계는 메인이 소유한다. 창이 닫혔으면 청취 창도 닫아야 한다.
+    // 소리는 내지 않는다 — 듣는 중인지 아닌지는 화면으로만 보여준다.
     engine.send({ type: 'listen.stop' });
-    sendToRenderer(IPC.playSound, 'idle-return');
   });
   state.on('memoryExpired', () => {
     // 8.2절: 기억이 만료되면 새 대화로 시작한다.

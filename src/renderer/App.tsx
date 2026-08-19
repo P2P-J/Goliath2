@@ -11,13 +11,34 @@ declare global {
 }
 
 const LABEL: Record<GoliathState, string> = {
-  inactive: '비활성',
-  idle: '대기',
-  booting: '부팅',
-  listening: '듣는 중',
-  transcribing: '인식 중',
+  inactive: '꺼짐',
+  idle: '대기 중',
+  booting: '기동 중',
+  listening: '듣고 있습니다',
+  transcribing: '알아듣는 중',
   working: '생각 중',
   speaking: '말하는 중',
+};
+
+/** 사용자가 말해도 되는 상태인지. 화면 상단 띠의 색을 가른다. */
+const OPEN_EAR: Record<GoliathState, boolean> = {
+  inactive: false,
+  idle: false,
+  booting: false,
+  listening: true,
+  transcribing: true,
+  working: false,
+  speaking: false,
+};
+
+const HINT: Record<GoliathState, string> = {
+  inactive: '메뉴바에서 인식을 켜세요',
+  idle: '"골리앗 온라인" 이라고 부르세요',
+  booting: '',
+  listening: '말씀하세요. 1.2초 조용해지면 알아듣습니다',
+  transcribing: '',
+  working: '',
+  speaking: '',
 };
 
 /** 7.4절: 시각적 중심은 상태 오브. */
@@ -120,6 +141,19 @@ export function App() {
       </aside>
 
       <main style={S.main}>
+        {/* 듣고 있는지 아닌지를 화면으로만 알린다. 효과음은 기동 때만. */}
+        <div style={{ ...S.status, ...(OPEN_EAR[state] ? S.statusOpen : null) }}>
+          <span
+            style={{
+              ...S.dot,
+              background: ORB[state],
+              animation: OPEN_EAR[state] ? 'pulse 1.4s ease-in-out infinite' : 'none',
+            }}
+          />
+          <span style={S.statusLabel}>{LABEL[state]}</span>
+          {HINT[state] ? <span style={S.statusHint}>{HINT[state]}</span> : null}
+        </div>
+
         {turns.length === 0 ? (
           <div style={S.empty}>
             <div style={S.emptyTitle}>골리앗 온라인</div>
@@ -191,7 +225,23 @@ const S: Record<string, React.CSSProperties> = {
     font: 'inherit',
     fontSize: 13,
   },
-  main: { overflowY: 'auto', padding: '46px 0 40px' },
+  main: { overflowY: 'auto', padding: '0 0 40px', position: 'relative' },
+  status: {
+    position: 'sticky',
+    top: 0,
+    zIndex: 2,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '14px 28px',
+    background: 'rgba(11,13,16,0.92)',
+    backdropFilter: 'blur(8px)',
+    borderBottom: '1px solid #1a1f26',
+  },
+  statusOpen: { borderBottomColor: '#2d5a44' },
+  dot: { width: 9, height: 9, borderRadius: '50%', flexShrink: 0 },
+  statusLabel: { fontSize: 13, fontWeight: 600, letterSpacing: '0.02em' },
+  statusHint: { fontSize: 12, color: '#6b7684' },
   stream: { maxWidth: 720, margin: '0 auto', padding: '0 28px', display: 'flex', flexDirection: 'column', gap: 14 },
   row: { display: 'flex' },
   bubble: { maxWidth: '78%', padding: '10px 15px', borderRadius: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
@@ -208,7 +258,7 @@ const S: Record<string, React.CSSProperties> = {
     borderRadius: 8,
     padding: '8px 14px',
   },
-  empty: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  empty: { minHeight: '60vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 },
   emptyTitle: { fontSize: 18, letterSpacing: '0.08em', color: '#3d4b5c' },
   emptyHint: { fontSize: 13, color: '#39424e' },
 };

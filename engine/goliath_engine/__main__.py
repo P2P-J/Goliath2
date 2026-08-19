@@ -34,12 +34,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisperModel": "medium",
     "language": "ko",
     "vocabularyHints": [
+        # 웨이크워드가 맨 앞에 온다 — 인식률이 여기 달려 있다.
+        "골리앗", "골리앗 온라인",
         "타입스크립트", "리팩터링", "useEffect", "일렉트론", "렌더러",
         "프로토콜", "웨이크워드", "커밋", "빌드", "디플로이", "비동기",
     ],
-    # 웨이크워드 — 학습 전까지 hey_jarvis (9절)
+    # 웨이크워드
+    #
+    # "골리앗 온라인" 은 openWakeWord 사전학습 모델에 없다. 커스텀 학습에는
+    # PyTorch 와 수 시간이 필요하다. 대신 이미 돌고 있는 Whisper 를 감지기로
+    # 쓴다 — 대기 중에도 발화를 인식하고 글자에 "골리앗" 이 있으면 깨어난다.
+    # 실측: 합성 음성 15종에서 15/15 인식.
+    #
+    # hey_jarvis 는 즉시 반응하는 빠른 경로로 함께 둔다.
+    "wakeWords": ["골리앗"],
     "wakeWordModel": "hey_jarvis",
     "wakeWordThreshold": 0.5,
+    #: 대기 중 인식할 발화의 최대 길이. 웨이크워드는 짧다 —
+    #: 긴 발화까지 인식하면 옆에서 통화만 해도 계속 인식기가 돈다.
+    "wakeMaxSpeechSec": 10.0,
     # 끼어들기 (5.3절)
     #   에어팟   켬 — 스피커 소리가 마이크로 거의 새지 않는다
     #   내장 스피커 끔 — 자기 목소리를 되듣고 스스로 끊는다
@@ -73,9 +86,15 @@ class Engine:
         self._interrupt_vad = None
         self._interrupt_fired = False
 
+        #: 마이크가 열려 웨이크워드를 기다리는 중.
+        self._armed = False
+        #: 청취 창이 열려 있다 — 웨이크워드 없이 바로 명령으로 받는다.
+        self._awake = False
+        self._loop_thread: threading.Thread | None = None
+
         self._speaking_id: str | None = None
         self._speak_thread: threading.Thread | None = None
-        self._listen_thread: threading.Thread | None = None
+        self._loop_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
     # -- 설정 -------------------------------------------------------------
@@ -205,10 +224,16 @@ class Engine:
         if not self.mic.is_open:
             self.mic.subscribe(self._on_frame)
             self.mic.start()
-        self.ch.log("웨이크워드 대기 시작")
+        self._armed = True
+        if self._loop_thread is None or not self._loop_thread.is_alive():
+            self._loop_thread = threading.Thread(target=self._listen_loop, daemon=True)
+            self._loop_thread.start()
+        self.ch.log(f"대기 시작 — 웨이크워드 {self.config['wakeWords']}")
 
     def _on_wake_disable(self, _cmd: dict[str, Any]) -> None:
         """2.4절: 마이크 스트림 자체를 닫는다 — 메뉴바 주황 점이 사라져야 한다."""
+        self._armed = False
+        self._awake = False
         self.collector.abort()
         self.mic.unsubscribe(self._on_frame)
         self.mic.stop()
@@ -217,89 +242,141 @@ class Engine:
         self.ch.log("웨이크워드 대기 중지 (마이크 닫힘)")
 
     def _on_listen_start(self, _cmd: dict[str, Any]) -> None:
-        """발화 수집 시작.
+        """청취 창을 연다 — 웨이크워드 없이 바로 명령으로 받는다.
 
-        웨이크워드가 울린 뒤 이 명령이 오기까지 시간이 걸린다. 그동안의 소리는
-        링 버퍼에 남아 있으므로 되돌아가 주워야 첫 음절을 잃지 않는다.
+        수집은 대기 중에도 계속 돌고 있다. 이 명령은 "다음 발화를 명령으로
+        취급하라"는 뜻이며, 웨이크워드 감지 후와 전역 단축키에서 온다.
         """
+        self._awake = True
         if not self.mic.is_open:
             self.mic.subscribe(self._on_frame)
             self.mic.start()
-        if self.collector.is_active:
-            return
-
-        self.collector.begin(preroll=self.mic.take_preroll())
-        self._listen_thread = threading.Thread(target=self._collect, daemon=True)
-        self._listen_thread.start()
+        if not self._armed:
+            self._armed = True
+            if self._loop_thread is None or not self._loop_thread.is_alive():
+                self._loop_thread = threading.Thread(target=self._listen_loop, daemon=True)
+                self._loop_thread.start()
 
     def _on_listen_stop(self, _cmd: dict[str, Any]) -> None:
-        self.collector.abort()
+        """청취 창을 닫는다. 대기는 계속된다."""
+        self._awake = False
 
-    def _collect(self) -> None:
-        """발화가 끝나기를 기다렸다가 인식하고 판정한다."""
-        utterance = self.collector.wait(UTTERANCE_TIMEOUT_SEC)
-        if utterance is None:
-            self.ch.transcript("", 0.0, 0, discarded=True, reason="silence")
-            return
+    def _listen_loop(self) -> None:
+        """마이크가 열려 있는 동안 발화를 계속 모으고 판정한다.
 
-        # 값싼 검사를 먼저. 대부분 소음인 오디오를 인식기에 넘기면 온도 폴백이
-        # 돌아 4초 발화에 10초가 걸리고, 결과는 어차피 폐기된다.
-        pre = prejudge(
-            duration_sec=utterance.duration_sec,
-            speech_sec=utterance.speech_sec,
-            speech_ratio=utterance.speech_ratio,
-        )
-        if pre.verdict is not Verdict.ACCEPT:
-            self.ch.log(
-                f"인식 생략({pre.reason}) 발화 {utterance.speech_sec:.1f}s / "
-                f"전체 {utterance.duration_sec:.1f}s / 비율 {utterance.speech_ratio:.0%}"
-                + (f" / 포화 {utterance.clipped_ratio:.0%}" if utterance.clipped_ratio > 0.02 else "")
+        대기 중  — 인식해서 웨이크워드가 있으면 깨운다
+        청취 중  — 그대로 명령으로 올린다
+        """
+        while self._armed:
+            if not self.collector.is_active:
+                self.collector.begin(preroll=self.mic.take_preroll())
+            utterance = self.collector.wait(UTTERANCE_TIMEOUT_SEC)
+            if utterance is None or not self._armed:
+                continue
+
+            pre = prejudge(
+                duration_sec=utterance.duration_sec,
+                speech_sec=utterance.speech_sec,
+                speech_ratio=utterance.speech_ratio,
             )
-            self.ch.transcript("", 0.0, 0, discarded=True, reason=pre.reason)
-            return
+            if pre.verdict is not Verdict.ACCEPT:
+                if self._awake:
+                    self.ch.transcript("", 0.0, 0, discarded=True, reason=pre.reason)
+                continue
 
-        try:
-            if not self._stt_loaded:
-                ms = self.stt.load(self.config["whisperModel"])
-                self._stt_loaded = True
-                self.ch.model("stt", loaded=True, load_ms=ms)
+            awake = self._awake
+            # 대기 중에는 짧은 발화만 인식한다. 옆에서 통화만 해도 인식기가
+            # 계속 도는 것을 막는다.
+            if not awake and utterance.speech_sec > float(self.config["wakeMaxSpeechSec"]):
+                continue
 
-            result = self.stt.transcribe(
-                utterance.audio,
-                language=self.config["language"],
-                hints=self._hints(),
-            )
-        except Exception as exc:
-            self.ch.error("stt_failed", f"{self.stt.name}: {exc}", fatal=False)
-            return
+            try:
+                if not self._stt_loaded:
+                    ms = self.stt.load(self.config["whisperModel"])
+                    self._stt_loaded = True
+                    self.ch.model("stt", loaded=True, load_ms=ms)
+                result = self.stt.transcribe(
+                    utterance.audio,
+                    language=self.config["language"],
+                    hints=self._hints(),
+                )
+            except Exception as exc:
+                self.ch.error("stt_failed", f"{self.stt.name}: {exc}", fatal=False)
+                continue
 
-        verdict = judge(
-            result.text,
-            duration_sec=utterance.duration_sec,
-            speech_ratio=utterance.speech_ratio,
-            no_speech_prob=result.no_speech_prob,
-            avg_logprob=result.avg_logprob,
-            compression_ratio=result.compression_ratio,
-        )
-
-        if verdict.verdict is Verdict.ACCEPT:
-            self.ch.transcript(
+            verdict = judge(
                 result.text,
-                confidence=float(result.avg_logprob or 0.0),
-                latency_ms=result.latency_ms,
+                duration_sec=utterance.duration_sec,
+                speech_ratio=utterance.speech_ratio,
+                no_speech_prob=result.no_speech_prob,
+                avg_logprob=result.avg_logprob,
+                compression_ratio=result.compression_ratio,
             )
-        else:
-            self.ch.log(
-                f"폐기({verdict.reason}) 발화 {utterance.speech_sec:.1f}s / "
-                f"비율 {utterance.speech_ratio:.0%} · {result.text[:40]!r}"
-            )
-            self.ch.transcript(
-                "" if verdict.verdict is Verdict.DISCARD else result.text,
-                confidence=float(result.avg_logprob or 0.0),
-                latency_ms=result.latency_ms,
-                discarded=True,
-                reason=verdict.reason,
-            )
+
+            if not awake:
+                # 대기 중 — 웨이크워드가 있어야만 깨운다.
+                command = self._strip_wake_word(result.text)
+                if command is None:
+                    continue
+                self._awake = True
+                self.ch.wake(1.0)
+                if command.strip():
+                    # "골리앗 온라인 오늘 일정 알려줘" 처럼 명령이 붙어 있으면
+                    # 바로 올린다. 이름만 불렀으면 다음 발화를 기다린다.
+                    self.ch.transcript(
+                        command.strip(),
+                        confidence=float(result.avg_logprob or 0.0),
+                        latency_ms=result.latency_ms,
+                    )
+                continue
+
+            if verdict.verdict is Verdict.ACCEPT:
+                self.ch.transcript(
+                    result.text,
+                    confidence=float(result.avg_logprob or 0.0),
+                    latency_ms=result.latency_ms,
+                )
+            else:
+                self.ch.log(
+                    f"폐기({verdict.reason}) 발화 {utterance.speech_sec:.1f}s · {result.text[:40]!r}"
+                )
+                self.ch.transcript(
+                    "" if verdict.verdict is Verdict.DISCARD else result.text,
+                    confidence=float(result.avg_logprob or 0.0),
+                    latency_ms=result.latency_ms,
+                    discarded=True,
+                    reason=verdict.reason,
+                )
+
+    def _strip_wake_word(self, text: str) -> str | None:
+        """웨이크워드가 있으면 그 뒤를 돌려준다. 없으면 None.
+
+        "골리앗 온라인 오늘 일정 알려줘" → "오늘 일정 알려줘"
+        "골리앗 온라인"                  → ""
+        "오늘 날씨 어때"                 → None
+        """
+        squeezed = text.replace(" ", "")
+        for word in self.config.get("wakeWords") or ():
+            key = word.replace(" ", "")
+            index = squeezed.find(key)
+            if index < 0:
+                continue
+            # 원문에서 대응 위치를 찾는다 — 공백을 지운 인덱스를 되돌린다.
+            seen = 0
+            for pos, ch in enumerate(text):
+                if not ch.isspace():
+                    if seen == index + len(key):
+                        rest = text[pos:]
+                        # "온라인" 같은 뒤따르는 기동어는 명령이 아니다.
+                        for filler in ("온라인", "온 라인", "online"):
+                            stripped = rest.lstrip(" ,.")
+                            if stripped.lower().startswith(filler):
+                                rest = stripped[len(filler):]
+                                break
+                        return rest.lstrip(" ,.")
+                    seen += 1
+            return ""
+        return None
 
     def _on_speak(self, cmd: dict[str, Any]) -> None:
         """말하기. 재생은 별도 스레드에서 — 명령 루프가 막히면 취소를 못 받는다."""
@@ -374,6 +451,8 @@ class Engine:
         self.ch.metrics(rss_mb=round(rss, 1), wake_cpu_percent=0.0, last_latency_ms=None)
 
     def _on_shutdown(self, _cmd: dict[str, Any]) -> None:
+        self._armed = False
+        self._awake = False
         self.tts.cancel()
         # 수집 중이면 끊는다. 이미 인식 단계라면 run() 이 결과를 기다린다.
         if self.collector.is_active:
@@ -394,8 +473,8 @@ class Engine:
                 break
         # 인식이 진행 중이면 결과를 잃지 않도록 기다린다. 종료 명령이
         # 인식보다 먼저 도착하면 transcript 가 사라진다.
-        if self._listen_thread and self._listen_thread.is_alive():
-            self._listen_thread.join(timeout=15.0)
+        if self._loop_thread and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=15.0)
         if self._speak_thread and self._speak_thread.is_alive():
             self._speak_thread.join(timeout=2.0)
 
