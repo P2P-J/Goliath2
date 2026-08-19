@@ -135,7 +135,8 @@ class Engine:
 
             self._interrupt_vad = VAD()
         try:
-            score = self._interrupt_vad.predict(frame.astype(np.float32) / 32768.0)
+            # int16 그대로. 정규화하면 점수가 0.03 수준으로 떨어진다.
+            score = self._interrupt_vad.predict(frame)
             if isinstance(score, (list, tuple, np.ndarray)):
                 score = float(np.max(score))
         except Exception:
@@ -325,8 +326,9 @@ class Engine:
 
     def _on_shutdown(self, _cmd: dict[str, Any]) -> None:
         self.tts.cancel()
-        self.collector.abort()
-        self.mic.stop()
+        # 수집 중이면 끊는다. 이미 인식 단계라면 run() 이 결과를 기다린다.
+        if self.collector.is_active:
+            self.collector.abort()
         self.running = False
 
     # -- 루프 -------------------------------------------------------------
@@ -341,6 +343,10 @@ class Engine:
                 self.ch.error("handler_failed", f"{cmd.get('type')}: {exc}", fatal=False)
             if not self.running:
                 break
+        # 인식이 진행 중이면 결과를 잃지 않도록 기다린다. 종료 명령이
+        # 인식보다 먼저 도착하면 transcript 가 사라진다.
+        if self._listen_thread and self._listen_thread.is_alive():
+            self._listen_thread.join(timeout=15.0)
         if self._speak_thread and self._speak_thread.is_alive():
             self._speak_thread.join(timeout=2.0)
         self.mic.stop()

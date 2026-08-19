@@ -227,8 +227,17 @@ class UtteranceCollector:
                 self._finish()
 
     def _is_speech(self, frame: np.ndarray) -> bool:
+        """openWakeWord 의 VAD 는 int16 을 먹는다. 정규화하면 안 된다.
+
+        float32 로 정규화해 넘기면 같은 음성 구간에서 점수가 0.99 → 0.03 으로
+        떨어져 임계값에 절대 닿지 못한다. 발화를 한 번도 감지하지 못하는
+        조용한 실패라 알아내기 어렵다.
+
+        입력 크기는 1280 샘플 고정이다 — 512/1024/1536/2048 은 모두 ONNX
+        오류가 난다.
+        """
         try:
-            score = self._vad.predict(frame.astype(np.float32) / 32768.0)
+            score = self._vad.predict(frame)
             if isinstance(score, (list, tuple, np.ndarray)):
                 score = float(np.max(score))
             return float(score) >= self._threshold
