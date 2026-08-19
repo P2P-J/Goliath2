@@ -24,6 +24,8 @@ from typing import Callable
 
 import numpy as np
 
+from .capture import Capture, default_capture
+
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 1280          # 80ms
 FRAME_MS = FRAME_SAMPLES * 1000 // SAMPLE_RATE
@@ -66,7 +68,8 @@ class Microphone:
     """
 
     def __init__(self, on_error: Callable[[str], None] | None = None) -> None:
-        self._stream = None
+        self._capture: Capture | None = None
+        self._partial = np.zeros(0, dtype=np.int16)
         self._queue: Queue[np.ndarray] = Queue(maxsize=64)
         self._worker: threading.Thread | None = None
         self._running = threading.Event()
@@ -105,36 +108,48 @@ class Microphone:
 
     @property
     def is_open(self) -> bool:
-        return self._stream is not None
+        return self._capture is not None
+
+    @property
+    def backend(self) -> str:
+        return self._capture.name if self._capture else "(닫힘)"
+
+    @property
+    def has_aec(self) -> bool:
+        """음향 반향 제거가 걸려 있는가. 말할 때 귀를 얼마나 닫을지 판단에 쓴다."""
+        return self._capture is not None and self._capture.has_aec
 
     def start(self) -> None:
-        if self._stream is not None:
+        if self._capture is not None:
             return
-        import sounddevice as sd
 
-        def callback(indata, _frames, _time, status) -> None:
-            if status:
-                # 언더런/오버런. 흔하고 치명적이지 않으므로 로그만.
-                self._on_error(f"오디오 상태: {status}")
-            try:
-                self._queue.put_nowait(indata[:, 0].copy())
-            except Exception:
-                # 큐가 찼다 — 소비자가 느리다. 프레임을 버리는 것이
-                # 콜백을 막는 것보다 낫다.
-                self._dropped += 1
-
+        capture = default_capture(FRAME_SAMPLES)
         self._running.set()
         self._worker = threading.Thread(target=self._pump, daemon=True)
         self._worker.start()
 
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            blocksize=FRAME_SAMPLES,
-            callback=callback,
-        )
-        self._stream.start()
+        def on_samples(samples: np.ndarray) -> None:
+            """캡처가 주는 조각을 고정 크기 프레임으로 잘라 큐에 넣는다.
+
+            AVAudioEngine 은 2048 샘플씩 주는데 우리는 1280 단위로 쓴다.
+            남는 것은 다음 호출에 이어 붙인다.
+            """
+            self._partial = np.concatenate([self._partial, samples])
+            while len(self._partial) >= FRAME_SAMPLES:
+                frame = self._partial[:FRAME_SAMPLES]
+                self._partial = self._partial[FRAME_SAMPLES:]
+                try:
+                    self._queue.put_nowait(frame)
+                except Exception:
+                    # 소비자가 느리다. 콜백을 막느니 프레임을 버린다.
+                    self._dropped += 1
+
+        try:
+            capture.start(on_samples)
+        except Exception:
+            self._running.clear()
+            raise
+        self._capture = capture
 
     def stop(self) -> None:
         """스트림을 완전히 닫는다.
@@ -143,10 +158,10 @@ class Microphone:
         일시정지가 아니라 close 여야 한다.
         """
         self._running.clear()
-        stream, self._stream = self._stream, None
-        if stream is not None:
-            stream.stop()
-            stream.close()
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            capture.stop()
+        self._partial = np.zeros(0, dtype=np.int16)
         if self._worker is not None:
             self._worker.join(timeout=1.0)
             self._worker = None

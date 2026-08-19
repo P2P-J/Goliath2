@@ -1,0 +1,26 @@
+# 골리앗 음성 엔진 의존성
+#
+#   python3 -m venv engine/.venv
+#   engine/.venv/bin/pip install -r engine/requirements.txt
+#
+# Python 3.14 에서 전부 설치·구동 확인됨.
+
+# 입(TTS) — 수퍼톤 온디바이스. 로컬·무료·오프라인.
+supertonic>=1.3.1
+
+# 귀(STT) — Apple Silicon Metal 가속.
+mlx-whisper>=0.4.0
+
+# 웨이크워드 + VAD (Silero 동봉). onnxruntime 은 여기 딸려 온다.
+openwakeword>=0.6.0
+
+# 오디오 재생, 그리고 macOS 가 아닌 환경의 마이크 폴백.
+sounddevice>=0.5.0
+soundfile>=0.13.0
+
+# 음향 반향 제거(AEC). macOS Voice Processing I/O 를 쓰기 위해 필요하다.
+# 이것이 없으면 스피커로 나간 자기 목소리가 마이크로 돌아와 스스로에게 답한다.
+pyobjc-framework-AVFoundation>=10.0 ; sys_platform == "darwin"
+
+# 계측용.
+psutil>=5.9
