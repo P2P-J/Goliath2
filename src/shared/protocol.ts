@@ -7,7 +7,7 @@
  *        메인 프로세스는 "말해라"라는 명령과 "말이 끝났다"는 통보만 주고받는다.
  *   2. 음악은 렌더러가 재생한다. 덕킹이 UI 상태와 동기화되어야 하므로,
  *      메인은 엔진 이벤트를 렌더러로 그대로 중계한다.
- *   3. 음성 엔진은 교체 가능한 부품이다. Fish Audio를 다른 TTS로 갈아끼울 때
+ *   3. 음성 엔진은 교체 가능한 부품이다. 수퍼토닉을 다른 TTS로 갈아끼울 때
  *      이 파일이 바뀌면 안 된다.
  *
  * 전송 방식: 엔진의 stdin/stdout에 줄 단위 JSON (UTF-8, 한 줄 = 한 메시지).
@@ -17,7 +17,7 @@
  * PROTOCOL_VERSION 을 올려야 한다. 불일치는 앱 시작 시 감지된다.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // 상태 (기획서 2.1절 상태 전이)
@@ -40,6 +40,22 @@ export type GoliathState =
   | 'transcribing'
   | 'working'
   | 'speaking';
+
+/** 음향 캐릭터 프리셋. engine/goliath_engine/audio_fx.py 와 짝을 이룬다. */
+export type VoicePreset = 'none' | 'jarvis' | 'goliath';
+
+/**
+ * 기본 음성 설정 — M1 보이스 + 자비스 프리셋.
+ * 10종을 직접 청취해 확정했다 (bench/make_voice_samples.py).
+ */
+export const DEFAULT_VOICE_CONFIG = {
+  voice: 'M1',
+  preset: 'jarvis',
+  speed: 1.35,
+  pitchFactor: 1.07,
+  fxIntensity: 1.0,
+  steps: 8,
+} as const;
 
 // ---------------------------------------------------------------------------
 // 메인 → 엔진 (명령)
@@ -89,10 +105,25 @@ export interface EngineConfig {
    * null 이면 출력 장치에 따라 자동 판단한다.
    */
   interruptEnabled: boolean | null;
-  /** 5.5절 보조 조정. */
-  voiceId: string | null;
-  speechRate: number;
-  speechPitch: number;
+  /**
+   * 입(TTS) 설정 — 수퍼토닉 기준.
+   *
+   * 수퍼토닉에는 음높이 파라미터가 없어, 합성 단계에서 speed 에 pitchFactor 를
+   * 곱해 두고 후처리에서 되돌린다 — 길이는 그대로, 음높이만 내려간다.
+   * 그래서 speed 와 pitchFactor 는 서로 독립적으로 조절된다.
+   */
+  /** 기본 보이스 10종: M1~M5(남성), F1~F5(여성). */
+  voice: string;
+  /** 캐릭터 프리셋. 발화 단위로 바꿀 수 있다 (부팅 멘트만 goliath 등). */
+  preset: VoicePreset;
+  /** 말 속도. 수퍼토닉 기본 1.05, 대화용 1.35. 범위 0.7~2.0. */
+  speed: number;
+  /** 음높이 하강 배율. 1.0 = 원본. 범위 1.0~1.3. */
+  pitchFactor: number;
+  /** 효과 강도. 0.0 = 무효과, 1.0 = 프리셋 기본값. */
+  fxIntensity: number;
+  /** 품질 스텝 5~12. 높을수록 또렷하고 느리다. */
+  steps: number;
   /** 5.4절 완화 옵션. 켜면 대기 중에는 내장 마이크를 쓴다 (전환에 0.5~1초). */
   wakeOnBuiltinMicOnly: boolean;
 }

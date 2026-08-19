@@ -2,26 +2,32 @@
 
 기획서 10절 원칙 3: "음성 엔진은 교체 가능한 부품이다."
 protocol.py 가 프로세스 경계의 계약이고, 이 파일이 그 안쪽의 계약이다.
-Fish Audio 를 다른 TTS 로 바꿔도 __main__.py 는 손대지 않는다.
 
-TTS 뒷단이 셋인 이유:
-  FishCloudBackend : 어디서나 돈다. 8 GB 맥북 포함. M1 의 기본값.
-  FishLocalBackend : S2-Pro 4B 오픈 웨이트. GPU 있는 기계에서만 현실적이다
-                     (공식 추론 스택이 SGLang/CUDA 지향이고 Apple Silicon 지원이 문서에 없다).
-  SayBackend       : macOS 내장 음성. 위 둘이 실패하면 자동 전환 (5.1절 폴백).
+입(TTS)
+  SupertonicBackend : 기본값. 로컬·무료·오프라인. 수퍼톤의 온디바이스 모델.
+  SayBackend        : macOS 내장 음성. 수퍼토닉 로드 실패 시 폴백 —
+                      항상 되는 것이 존재 이유다.
 
-STT 뒷단이 둘인 이유:
-  MlxWhisperBackend     : Apple Silicon 에서 Metal 가속. 맥에서 가장 빠르다.
-  FasterWhisperBackend  : CTranslate2. CPU/CUDA 양쪽. 데스크톱·리눅스용.
+귀(STT)
+  MlxWhisperBackend    : Apple Silicon Metal 가속. 맥에서 기본값.
+  FasterWhisperBackend : CTranslate2. CPU/CUDA. 데스크톱·리눅스용.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
+import threading
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from queue import Empty, Queue
+from typing import Callable
+
+import numpy as np
+
+from .audio_fx import FxConfig, VoicePreset, apply_preset
 
 
 # ---------------------------------------------------------------------------
@@ -32,9 +38,13 @@ from dataclasses import dataclass
 @dataclass
 class SpeechRequest:
     text: str
-    voice_id: str | None = None
-    rate: float = 1.0
-    pitch: float = 0.0
+    voice: str = "M1"
+    #: 말 속도. 수퍼토닉 기본 1.05, 대화용 1.35.
+    speed: float = 1.35
+    fx: FxConfig = field(default_factory=lambda: FxConfig(preset=VoicePreset.JARVIS,
+                                                          pitch_factor=1.07))
+    #: 품질 스텝 5~12. 높을수록 또렷하고 느리다.
+    steps: int = 8
 
 
 class TtsBackend(ABC):
@@ -43,77 +53,227 @@ class TtsBackend(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def is_available(self) -> bool:
-        """지금 이 기계에서 쓸 수 있는지. 키가 없거나 GPU 가 없으면 False."""
+    def is_available(self) -> bool: ...
 
     @abstractmethod
-    def synthesize(self, request: SpeechRequest) -> Iterator[bytes]:
-        """오디오 청크를 순서대로 내놓는다.
+    def load(self) -> int:
+        """모델을 올리고 걸린 시간(ms)을 돌려준다."""
 
-        문장 단위 스트리밍이 핵심이다 — 첫 청크를 빨리 내야 발화종료→첫소리
-        지연이 6초 안에 들어온다 (M1 통과 조건, 리스크 #1 대응).
+    @abstractmethod
+    def unload(self) -> None:
+        """모델을 해제한다 (7.1절 유휴 15분·인식 비활성화)."""
+
+    @abstractmethod
+    def speak(self, request: SpeechRequest, on_first_audio: Callable[[int], None]) -> bool:
+        """합성하고 재생한다. 재생 완료면 True, 취소면 False.
+
+        on_first_audio 는 첫 소리가 스피커로 나가는 순간 호출된다 —
+        발화종료→첫소리 지연 측정의 종점이다 (M1 통과 조건).
         """
 
+    @abstractmethod
     def cancel(self) -> None:
-        """진행 중인 합성을 중단한다. 끼어들기(2.3절)가 여기에 달려 있다."""
+        """재생을 즉시 중단한다. 끼어들기(2.3절)의 응답성이 여기 달려 있다."""
 
 
-class FishCloudBackend(TtsBackend):
-    """Fish Audio 클라우드 API. 기본 경로."""
+# 한국어 문장 분리. 종결부호를 남기고 자른다.
+_SENTENCE = re.compile(r"[^.!?…\n]*[.!?…]+|[^.!?…\n]+")
+#: 첫 소리를 앞당기기 위해 첫 문장이 이보다 길면 쉼표에서 한 번 더 자른다.
+_FIRST_CHUNK_LIMIT = 40
+#: 재생 블록 크기(프레임). 44.1kHz 에서 약 46ms — 취소 반응 시간의 상한이다.
+#: 더 줄이면 반응이 빨라지지만 write 호출이 잦아진다.
+_PLAYBACK_BLOCK = 2048
 
-    name = "fish-cloud"
 
-    def __init__(self, api_key: str | None) -> None:
-        self.api_key = api_key
+def split_sentences(text: str) -> list[str]:
+    """문장 단위로 자른다. 첫 조각은 짧게 만들어 첫 소리를 앞당긴다."""
+    parts = [s.strip() for s in _SENTENCE.findall(text)]
+    parts = [s for s in parts if s]
+    if not parts:
+        return []
+
+    head = parts[0]
+    if len(head) > _FIRST_CHUNK_LIMIT and "," in head:
+        cut = head.index(",", 0) + 1
+        # 쉼표가 너무 앞이면 의미 없는 조각이 된다.
+        if cut >= 8:
+            parts = [head[:cut].strip(), head[cut:].strip()] + parts[1:]
+    return [p for p in parts if p]
+
+
+def _drain(queue: Queue, producer: threading.Thread) -> None:
+    """취소된 발화의 뒷정리.
+
+    생산자는 maxsize 가 찬 큐에 put 하며 막혀 있을 수 있다. 큐를 비워
+    빠져나오게 한 뒤 회수한다. 호출자를 붙잡지 않는 것이 목적이다.
+    """
+    while True:
+        try:
+            if queue.get(timeout=2.0) is None:
+                break
+        except Empty:
+            break
+    producer.join(timeout=2.0)
+
+
+class SupertonicBackend(TtsBackend):
+    """수퍼톤 수퍼토닉 (온디바이스). 기본 경로.
+
+    문장 단위로 합성해 재생 큐에 흘린다. RTF 가 0.2 남짓이라 합성이 재생을
+    5배 앞서므로, 첫 문장만 만들면 이후로는 끊기지 않는다.
+    """
+
+    name = "supertonic"
+
+    def __init__(self) -> None:
+        self._tts = None
+        self._sr = 44100
+        self._cancel = threading.Event()
+        self._styles: dict[str, object] = {}
 
     def is_available(self) -> bool:
-        return bool(self.api_key)
-
-    def synthesize(self, request: SpeechRequest) -> Iterator[bytes]:
-        # TODO(M1): Fish Audio TTS 엔드포인트로 스트리밍 요청.
-        #   - 문장 단위로 쪼개 보내 첫 소리를 앞당긴다.
-        #   - 네트워크 실패는 예외로 올려서 SayBackend 로 폴백시킨다 (8.4절).
-        raise NotImplementedError("M1")
-
-
-class FishLocalBackend(TtsBackend):
-    """Fish Audio S2-Pro 로컬 가중치. GPU 있는 기계용."""
-
-    name = "fish-local"
-
-    def __init__(self, model_path: str | None) -> None:
-        self.model_path = model_path
-
-    def is_available(self) -> bool:
-        if not self.model_path:
+        try:
+            import supertonic  # noqa: F401
+            import sounddevice  # noqa: F401
+        except ImportError:
             return False
-        # TODO(M5): CUDA 가용성 확인. Apple Silicon 에서는 현재 경로가 없다.
-        return False
+        return True
 
-    def synthesize(self, request: SpeechRequest) -> Iterator[bytes]:
-        raise NotImplementedError("M5")
+    def load(self) -> int:
+        if self._tts is not None:
+            return 0
+        from supertonic import TTS
+
+        t0 = time.perf_counter()
+        self._tts = TTS()
+        self._sr = self._tts.sample_rate
+        return int((time.perf_counter() - t0) * 1000)
+
+    def unload(self) -> None:
+        self._tts = None
+        self._styles.clear()
+
+    def _style(self, voice: str):
+        if voice not in self._styles:
+            self._styles[voice] = self._tts.get_voice_style(voice)
+        return self._styles[voice]
+
+    def _synthesize(self, sentence: str, req: SpeechRequest) -> np.ndarray:
+        # 후처리에서 pitch_factor 배 늘어나므로 합성 단계에서 미리 그만큼 빠르게.
+        wav, _ = self._tts.synthesize(
+            sentence,
+            voice_style=self._style(req.voice),
+            lang="ko",
+            total_steps=req.steps,
+            speed=req.speed * req.fx.pitch_factor,
+        )
+        return apply_preset(np.asarray(wav).reshape(-1), self._sr, req.fx)
+
+    def speak(self, request: SpeechRequest, on_first_audio: Callable[[int], None]) -> bool:
+        import sounddevice as sd
+
+        sentences = split_sentences(request.text)
+        if not sentences:
+            return True
+
+        self._cancel.clear()
+        self.load()
+        started = time.perf_counter()
+
+        # 합성을 앞서 돌린다. maxsize 2 면 메모리를 아끼면서도 재생이 굶지 않는다.
+        queue: Queue = Queue(maxsize=2)
+
+        def produce() -> None:
+            try:
+                for sentence in sentences:
+                    if self._cancel.is_set():
+                        break
+                    queue.put(self._synthesize(sentence, request))
+            except Exception as exc:  # 합성 실패는 재생 쪽으로 전달한다
+                queue.put(exc)
+            finally:
+                queue.put(None)  # 종료 표지
+
+        producer = threading.Thread(target=produce, daemon=True)
+        producer.start()
+
+        stream = sd.OutputStream(samplerate=self._sr, channels=1, dtype="float32")
+        stream.start()
+        first = True
+        completed = True
+
+        try:
+            while completed:
+                if self._cancel.is_set():
+                    completed = False
+                    break
+                try:
+                    chunk = queue.get(timeout=0.05)
+                except Empty:
+                    continue
+                if chunk is None:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
+                if first:
+                    on_first_audio(int((time.perf_counter() - started) * 1000))
+                    first = False
+
+                # 한 문장을 통째로 write 하면 그 시간(수 초) 동안 블록되어
+                # 취소를 확인하지 못한다. 작은 블록으로 나눠 매번 확인한다 —
+                # 끼어들기(2.3절)의 응답성이 여기서 결정된다.
+                for start in range(0, len(chunk), _PLAYBACK_BLOCK):
+                    if self._cancel.is_set():
+                        completed = False
+                        break
+                    stream.write(chunk[start : start + _PLAYBACK_BLOCK].reshape(-1, 1))
+        finally:
+            if self._cancel.is_set():
+                stream.abort()  # 버퍼를 버린다 — 끼어들기는 즉시 멈춰야 한다
+            else:
+                stream.stop()
+            stream.close()
+            self._cancel.set()  # 생산자를 깨워 정리시킨다
+            # 생산자가 합성 중이면 한 문장만큼(≈1초) 더 걸린다. 여기서 기다리면
+            # speak.end 가 그만큼 늦어져 상태 기계의 청취 복귀가 밀린다.
+            # 큐를 비우는 뒷정리는 배경에 맡기고 즉시 반환한다.
+            threading.Thread(
+                target=_drain, args=(queue, producer), daemon=True
+            ).start()
+
+        return completed
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
 
 class SayBackend(TtsBackend):
-    """macOS 내장 음성. 폴백 전용 — 항상 되는 것이 존재 이유다 (5.1절)."""
+    """macOS 내장 음성. 폴백 전용 — 항상 되는 것이 존재 이유다."""
 
     name = "macos-say"
 
-    def __init__(self, voice: str = "Yuna") -> None:  # Yuna: 한국어 음성
+    def __init__(self, voice: str = "Yuna") -> None:
         self.voice = voice
         self._proc: subprocess.Popen[bytes] | None = None
 
     def is_available(self) -> bool:
         return shutil.which("say") is not None
 
-    def synthesize(self, request: SpeechRequest) -> Iterator[bytes]:
-        # say 는 스피커로 직접 재생하므로 청크를 돌려줄 것이 없다.
-        # 폴백 경로에서는 "소리가 난다"가 유일한 요구사항이다.
+    def load(self) -> int:
+        return 0
+
+    def unload(self) -> None:
+        return None
+
+    def speak(self, request: SpeechRequest, on_first_audio: Callable[[int], None]) -> bool:
+        t0 = time.perf_counter()
         self._proc = subprocess.Popen(
-            ["say", "-v", self.voice, "-r", str(int(180 * request.rate)), request.text]
+            ["say", "-v", self.voice, "-r", str(int(180 * request.speed)), request.text]
         )
-        self._proc.wait()
-        return iter(())
+        on_first_audio(int((time.perf_counter() - t0) * 1000))
+        code = self._proc.wait()
+        self._proc = None
+        return code == 0
 
     def cancel(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -126,6 +286,10 @@ def select_tts(candidates: list[TtsBackend]) -> TtsBackend:
         if backend.is_available():
             return backend
     raise RuntimeError("쓸 수 있는 TTS 뒷단이 없습니다 — say 조차 없는 환경입니다")
+
+
+def default_tts() -> TtsBackend:
+    return select_tts([SupertonicBackend(), SayBackend()])
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +308,10 @@ class SttBackend(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def load(self, model: str) -> int:
-        """모델을 메모리에 올리고 걸린 시간(ms)을 돌려준다 (7.1절 생명주기)."""
+    def load(self, model: str) -> int: ...
 
     @abstractmethod
-    def unload(self) -> None:
-        """모델을 즉시 해제한다. 유휴 15분·인식 비활성화에서 호출된다."""
+    def unload(self) -> None: ...
 
     @abstractmethod
     def transcribe(self, audio: bytes, *, language: str, hints: list[str]) -> Transcription:

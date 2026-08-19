@@ -14,7 +14,7 @@ import sys
 import threading
 from typing import Any
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 ENGINE_VERSION = "0.1.0"
 
 
