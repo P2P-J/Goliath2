@@ -400,6 +400,14 @@ class MlxWhisperBackend(SttBackend):
             path_or_hf_repo=self._repo,
             language=language,
             initial_prompt=hints or None,
+            # 앞 구간의 결과를 다음 구간의 문맥으로 넣지 않는다.
+            # 실측: 정확도는 그대로(CER 0.8%)이고 지연이 절반으로 줄었다
+            # (7075ms → 3547ms). 환각 반복 고리도 끊긴다.
+            #
+            # 내장 억제 파라미터는 쓰지 않는다. hallucination_silence_threshold
+            # 는 3.5배 느려지면서 환각을 막지 못했다 (실측). 환각 방어는
+            # "무음을 인식기에 넘기지 않는 것"(hallucination.prejudge)뿐이다.
+            condition_on_previous_text=False,
         )
         latency = int((time.perf_counter() - t0) * 1000)
 
