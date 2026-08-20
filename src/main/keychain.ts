@@ -52,12 +52,15 @@ export async function deleteKey(account: string): Promise<void> {
   }
 }
 
-/** 우리가 쓰는 키 목록. 여기에 없는 이름은 저장하지 않는다. */
+/**
+ * 우리가 쓰는 키 목록. 여기에 없는 이름은 저장하지 않는다.
+ *
+ * 귀(Whisper)와 입(수퍼토닉)은 로컬이라 키가 없다. 뇌는 클로드 구독을
+ * 재사용하므로 평소에는 이것조차 필요 없고, API 뒷단을 쓸 때만 쓰인다.
+ * 구글 커넥터(M7)는 그때 다시 넣는다.
+ */
 export const KEYS = {
   anthropic: 'ANTHROPIC_API_KEY',
-  fishAudio: 'FISH_AUDIO_API_KEY',
-  googleClientId: 'GOOGLE_CLIENT_ID',
-  googleClientSecret: 'GOOGLE_CLIENT_SECRET',
 } as const;
 
 export type KeyName = (typeof KEYS)[keyof typeof KEYS];

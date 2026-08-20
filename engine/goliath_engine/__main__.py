@@ -94,6 +94,9 @@ class Engine:
 
         #: 이 시각 전까지는 마이크 입력을 무시한다 (자기 목소리 잔향).
         self._ear_reopen_at = 0.0
+        #: 출력 장치 판정 캐시. 프레임마다 조회하면 초당 12.5회 시스템 호출이다.
+        self._output_headphones = False
+        self._output_checked_until = 0.0
         #: 최근에 골리앗이 한 말. 메아리를 글자로 걸러내는 데 쓴다.
         self._recent_speech: deque[str] = deque(maxlen=8)
         #: 마이크가 열려 웨이크워드를 기다리는 중.
@@ -210,17 +213,31 @@ class Engine:
         return self._output_is_headphones()
 
     def _output_is_headphones(self) -> bool:
-        """기본 출력이 헤드폰/블루투스인지. 판단이 안 서면 안전하게 False."""
+        """기본 출력이 헤드폰/블루투스인지. 판단이 안 서면 안전하게 False.
+
+        결과를 캐시한다. 이 판정은 프레임마다(80ms) 불리는데 매번 장치를
+        조회하면 초당 12.5회 시스템 호출이 된다.
+        """
+        now = time.monotonic()
+        if now < self._output_checked_until:
+            return self._output_headphones
+        self._output_checked_until = now + 3.0
         try:
             import sounddevice as sd
 
             name = str(sd.query_devices(kind="output")["name"]).lower()
         except Exception:
+            self._output_headphones = False
             return False
         # 내장 스피커는 이름에 speaker/내장 이 들어간다.
         if "speaker" in name or "내장" in name or "macbook" in name:
-            return False
-        return any(k in name for k in ("airpod", "headphone", "buds", "bluetooth", "헤드", "이어"))
+            self._output_headphones = False
+        else:
+            self._output_headphones = any(
+                k in name
+                for k in ("airpod", "headphone", "buds", "bluetooth", "헤드", "이어")
+            )
+        return self._output_headphones
 
     def _on_speech_change(self, active: bool) -> None:
         # 수집 중의 발화 시작/끝. 메인은 UI 반응에 쓴다.

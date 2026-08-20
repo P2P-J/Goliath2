@@ -26,9 +26,9 @@ const RECIPES: Record<SoundEvent, Tone[]> = {
   ],
   // 깨어남: 짧은 상승 2음
   wake: [{ wave: 'triangle', freqs: [660, 880], duration: 0.15, gain: 0.2 }],
-  // 처리 중: 낮은 맥동 (루프는 startLoop 로 따로 처리)
+  // 처리 중·완료: 사용자 요청으로 소리를 내지 않는다. 상태는 화면으로만
+  // 알린다 (7.4절 상태 띠). 레시피는 남겨 두되 메인이 부르지 않는다.
   processing: [{ wave: 'sine', freqs: [110], duration: 0.5, gain: 0.14 }],
-  // 완료: 하강 2음
   complete: [{ wave: 'sine', freqs: [880, 660], duration: 0.2, gain: 0.2 }],
   // 오류: 낮은 부저
   error: [{ wave: 'square', freqs: [160], duration: 0.25, gain: 0.14 }],

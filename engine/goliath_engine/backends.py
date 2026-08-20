@@ -15,7 +15,6 @@ protocol.py 가 프로세스 경계의 계약이고, 이 파일이 그 안쪽의
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import threading
@@ -76,8 +75,8 @@ class TtsBackend(ABC):
         """재생을 즉시 중단한다. 끼어들기(2.3절)의 응답성이 여기 달려 있다."""
 
 
-# 한국어 문장 분리. 종결부호를 남기고 자른다.
-_SENTENCE = re.compile(r"[^.!?…\n]*[.!?…]+|[^.!?…\n]+")
+#: 문장 종결부호.
+_TERMINATORS = ".!?…"
 #: 첫 소리를 앞당기기 위해 첫 문장이 이보다 길면 쉼표에서 한 번 더 자른다.
 _FIRST_CHUNK_LIMIT = 40
 #: 재생 블록 크기(프레임). 44.1kHz 에서 약 46ms — 취소 반응 시간의 상한이다.
@@ -86,16 +85,45 @@ _PLAYBACK_BLOCK = 2048
 
 
 def split_sentences(text: str) -> list[str]:
-    """문장 단위로 자른다. 첫 조각은 짧게 만들어 첫 소리를 앞당긴다."""
-    parts = [s.strip() for s in _SENTENCE.findall(text)]
-    parts = [s for s in parts if s]
+    """문장 단위로 자른다. 첫 조각은 짧게 만들어 첫 소리를 앞당긴다.
+
+    종결부호 뒤에 **공백이 와야** 문장 끝으로 본다. 그러지 않으면
+    "claude.ai" 가 "claude." / "ai" 로, "3.14" 가 "3." / "14" 로 쪼개진다.
+    정규식 문자 클래스로는 풀 수 없다 — [^.!?…] 가 점을 배제하므로 점이 든
+    문장을 한 덩어리로 잡을 수 없고 앞부분이 통째로 버려진다.
+
+    src/main/speech-filter.ts 의 takeCompleteSentences 와 같은 규칙이다.
+    한쪽만 고치면 다른 쪽에서 같은 증상이 되살아난다.
+    """
+    parts: list[str] = []
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "\n" and ch not in _TERMINATORS:
+            i += 1
+            continue
+        end = i
+        if ch != "\n":
+            while end + 1 < len(text) and text[end + 1] in _TERMINATORS:
+                end += 1
+            nxt = text[end + 1] if end + 1 < len(text) else None
+            if nxt is not None and not nxt.isspace():
+                i = end + 1
+                continue
+        chunk = text[start : end + 1].strip()
+        if chunk:
+            parts.append(chunk)
+        start = i = end + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
     if not parts:
         return []
 
     head = parts[0]
     if len(head) > _FIRST_CHUNK_LIMIT and "," in head:
-        cut = head.index(",", 0) + 1
-        # 쉼표가 너무 앞이면 의미 없는 조각이 된다.
+        cut = head.index(",") + 1
         if cut >= 8:
             parts = [head[:cut].strip(), head[cut:].strip()] + parts[1:]
     return [p for p in parts if p]

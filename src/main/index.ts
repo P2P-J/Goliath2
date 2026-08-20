@@ -175,10 +175,16 @@ function onEngineEvent(event: EngineEvent): void {
     }
 
     case 'speech':
-      // 말하는 중에 발화가 감지되면 끼어들기 (5.3절).
-      if (event.active && state.state === 'speaking') {
-        engine.send({ type: 'speak.cancel', id: 'current' });
-        brain.abort(); // 남은 응답을 계속 생성할 이유가 없다
+      if (event.active) {
+        // 말하는 중에 발화가 감지되면 끼어들기 (5.3절).
+        if (state.state === 'speaking') {
+          engine.send({ type: 'speak.cancel', id: 'current' });
+          brain.abort(); // 남은 응답을 계속 생성할 이유가 없다
+        }
+      } else if (state.state === 'listening') {
+        // 발화가 끝났다. 인식에 1~3초가 걸리므로 그동안 "듣고 있습니다"를
+        // 계속 띄우면 말을 못 알아들은 것처럼 보인다.
+        state.transition('transcribing');
       }
       break;
 
