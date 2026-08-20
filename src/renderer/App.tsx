@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { DUCK_LEVELS, type GoliathState, type SoundEvent } from '@shared/protocol';
+import {
+  DUCK_LEVELS,
+  type GoliathState,
+  type MusicState,
+  type SoundEvent,
+  type Track,
+} from '@shared/protocol';
+import { MusicPlayer } from './music';
 import { SoundBoard } from './sounds';
 import type { GoliathApi } from '../preload';
 
@@ -73,7 +80,12 @@ const TOOL_LABEL: Record<string, string> = {
 export function App() {
   const [state, setState] = useState<GoliathState>('inactive');
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [tab, setTab] = useState<'대화' | '재생목록'>('대화');
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [folder, setFolder] = useState<string | null>(null);
+  const [music, setMusic] = useState<MusicState | null>(null);
   const board = useRef<SoundBoard>(new SoundBoard());
+  const player = useRef<MusicPlayer | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -101,13 +113,53 @@ export function App() {
       });
     });
 
+    // 음악 — 재생은 렌더러가 한다 (원칙 2).
+    const mp = new MusicPlayer((next) => {
+      setMusic(next);
+      window.goliath.reportMusicState(next);
+    });
+    player.current = mp;
+
+    void window.goliath.getMusicLibrary().then((lib) => {
+      setTracks(lib.tracks);
+      setFolder(lib.folder);
+      mp.setLibrary(lib.tracks, lib.startIndex, lib.volume);
+    });
+
+    const offLibrary = window.goliath.onMusicLibrary((lib) => {
+      setTracks(lib.tracks);
+      setFolder(lib.folder);
+      mp.setLibrary(lib.tracks, lib.startIndex, lib.volume);
+    });
+
+    const offControl = window.goliath.onMusicControl((c) => {
+      switch (c.type) {
+        case 'play': mp.play(c.index); break;
+        case 'pause': mp.pause(); break;
+        case 'toggle': mp.toggle(); break;
+        case 'next': mp.next(); break;
+        case 'previous': mp.previous(); break;
+        case 'stop': mp.stop(); break;
+        case 'volume': mp.setVolume(c.value); break;
+        case 'seek': mp.seek(c.seconds); break;
+      }
+    });
+
     return () => {
       offState();
       offSound();
       offTurn();
+      offLibrary();
+      offControl();
       sb.dispose();
+      mp.dispose();
     };
   }, []);
+
+  // 9절 덕킹 — 상태가 바뀌면 음악 볼륨을 줄이고 되돌린다.
+  useEffect(() => {
+    player.current?.applyDuck(state);
+  }, [state]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -118,8 +170,12 @@ export function App() {
       <aside style={S.sidebar}>
         <div style={S.brand}>골리앗</div>
         <nav style={S.nav}>
-          {['대화', '재생목록', '설정'].map((item, i) => (
-            <div key={item} style={{ ...S.navItem, ...(i === 0 ? S.navActive : null) }}>
+          {(['대화', '재생목록'] as const).map((item) => (
+            <div
+              key={item}
+              onClick={() => setTab(item)}
+              style={{ ...S.navItem, ...(tab === item ? S.navActive : null), cursor: 'pointer' }}
+            >
               {item}
             </div>
           ))}
@@ -133,7 +189,9 @@ export function App() {
             }}
           />
           <div style={S.orbLabel}>{LABEL[state]}</div>
-          <div style={S.duck}>음악 {Math.round(DUCK_LEVELS[state] * 100)}%</div>
+          <div style={S.duck}>
+            {music?.playing ? `음악 ${Math.round(DUCK_LEVELS[state] * 100)}%` : '음악 없음'}
+          </div>
         </div>
         <button style={S.button} onClick={() => window.goliath.command('toggle-active')}>
           {state === 'inactive' ? '인식 켜기' : '인식 끄기'}
@@ -154,7 +212,14 @@ export function App() {
           {HINT[state] ? <span style={S.statusHint}>{HINT[state]}</span> : null}
         </div>
 
-        {turns.length === 0 ? (
+        {tab === '재생목록' ? (
+          <Playlist
+            tracks={tracks}
+            folder={folder}
+            current={music?.index ?? -1}
+            playing={music?.playing ?? false}
+          />
+        ) : turns.length === 0 ? (
           <div style={S.empty}>
             <div style={S.emptyTitle}>골리앗 온라인</div>
             <div style={S.emptyHint}>말을 걸어보세요. 대화가 여기에 쌓입니다.</div>
@@ -168,6 +233,81 @@ export function App() {
           </div>
         )}
       </main>
+
+      {music?.title ? <MiniPlayer music={music} /> : null}
+    </div>
+  );
+}
+
+function Playlist({
+  tracks, folder, current, playing,
+}: { tracks: Track[]; folder: string | null; current: number; playing: boolean }) {
+  if (tracks.length === 0) {
+    return (
+      <div style={S.empty}>
+        <div style={S.emptyTitle}>재생목록이 비어 있습니다</div>
+        <div style={S.emptyHint}>음악이 든 폴더를 고르면 여기에 채워집니다</div>
+        <button style={{ ...S.button, marginTop: 14 }} onClick={() => void window.goliath.chooseMusicFolder()}>
+          폴더 고르기
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div style={S.stream}>
+      <div style={S.folderRow}>
+        <span style={S.folderPath}>{folder}</span>
+        <button style={S.smallButton} onClick={() => void window.goliath.chooseMusicFolder()}>
+          바꾸기
+        </button>
+      </div>
+      {tracks.map((t, i) => (
+        <div
+          key={t.path}
+          onClick={() => window.goliath.control({ type: 'play', index: i })}
+          style={{ ...S.trackRow, ...(i === current ? S.trackActive : null) }}
+        >
+          <span style={S.trackNum}>{i === current && playing ? '▶' : i + 1}</span>
+          <span style={S.trackTitle}>{t.title}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const mmss = (s: number) =>
+  `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+function MiniPlayer({ music }: { music: MusicState }) {
+  const progress = music.duration > 0 ? (music.position / music.duration) * 100 : 0;
+  return (
+    <div style={S.player}>
+      <div
+        style={S.progressTrack}
+        onClick={(e) => {
+          const box = e.currentTarget.getBoundingClientRect();
+          const ratio = (e.clientX - box.left) / box.width;
+          window.goliath.control({ type: 'seek', seconds: ratio * music.duration });
+        }}
+      >
+        <div style={{ ...S.progressFill, width: `${progress}%` }} />
+      </div>
+      <div style={S.playerRow}>
+        <button style={S.playerButton} onClick={() => window.goliath.control({ type: 'previous' })}>◀◀</button>
+        <button style={S.playerButton} onClick={() => window.goliath.control({ type: 'toggle' })}>
+          {music.playing ? '❙❙' : '▶'}
+        </button>
+        <button style={S.playerButton} onClick={() => window.goliath.control({ type: 'next' })}>▶▶</button>
+        <span style={S.playerTitle}>{music.title}</span>
+        <span style={S.playerTime}>
+          {mmss(music.position)} / {mmss(music.duration)}
+        </span>
+        <input
+          type="range" min={0} max={1} step={0.01} value={music.volume}
+          onChange={(e) => window.goliath.control({ type: 'volume', value: Number(e.target.value) })}
+          style={S.volume}
+        />
+      </div>
     </div>
   );
 }
@@ -261,4 +401,34 @@ const S: Record<string, React.CSSProperties> = {
   empty: { minHeight: '60vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 },
   emptyTitle: { fontSize: 18, letterSpacing: '0.08em', color: '#3d4b5c' },
   emptyHint: { fontSize: 13, color: '#39424e' },
+
+  folderRow: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 8 },
+  folderPath: { fontSize: 11.5, color: '#6b7684', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  smallButton: {
+    padding: '4px 10px', borderRadius: 6, border: '1px solid #232a33',
+    background: '#141920', color: '#aab4c2', cursor: 'pointer', font: 'inherit', fontSize: 12,
+  },
+  trackRow: {
+    display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px',
+    borderRadius: 8, cursor: 'pointer', fontSize: 13.5,
+  },
+  trackActive: { background: '#141920', color: '#4fd1a3' },
+  trackNum: { width: 22, textAlign: 'right', color: '#4b5563', fontSize: 12, flexShrink: 0 },
+  trackTitle: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+
+  player: {
+    position: 'fixed', left: 212, right: 0, bottom: 0,
+    background: 'rgba(15,19,24,0.97)', backdropFilter: 'blur(10px)',
+    borderTop: '1px solid #1a1f26',
+  },
+  progressTrack: { height: 3, background: '#1a1f26', cursor: 'pointer' },
+  progressFill: { height: '100%', background: '#4fd1a3', transition: 'width 240ms linear' },
+  playerRow: { display: 'flex', alignItems: 'center', gap: 12, padding: '9px 20px' },
+  playerButton: {
+    border: 'none', background: 'transparent', color: '#aab4c2',
+    cursor: 'pointer', fontSize: 12, padding: '2px 4px',
+  },
+  playerTitle: { flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  playerTime: { fontSize: 11.5, color: '#6b7684', fontVariantNumeric: 'tabular-nums' },
+  volume: { width: 82 },
 };

@@ -1,7 +1,13 @@
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, nativeImage } from 'electron';
 import { resolve } from 'node:path';
 
-import { IPC, type EngineEvent, type GoliathState } from '@shared/protocol';
+import {
+  IPC,
+  type EngineEvent,
+  type GoliathState,
+  type MusicControl,
+  type MusicState,
+} from '@shared/protocol';
 import { VoiceEngine } from './engine';
 import { ConversationState } from './state';
 import type { Brain, BrainEvents } from './brain';
@@ -9,6 +15,8 @@ import { ClaudeSubscriptionBrain } from './brain-claude-subscription';
 import { ClaudeApiBrain } from './brain-claude-api';
 import { filterForSpeech } from './speech-filter';
 import { KEYS, migrateEnvFile } from './keychain';
+import { MusicLibrary } from './music';
+import { acknowledge, matchMusicCommand } from './voice-commands';
 
 /**
  * 골리앗 메인 프로세스.
@@ -31,6 +39,10 @@ const state = new ConversationState();
  */
 const brain: Brain =
   process.env.GOLIATH_BRAIN === 'api' ? new ClaudeApiBrain() : new ClaudeSubscriptionBrain();
+
+const music = new MusicLibrary();
+/** 렌더러가 알려주는 재생 상태. 자동 재생 여부 판단에 쓴다 (9절). */
+let musicState: MusicState | null = null;
 
 /** 이번 턴에 엔진으로 보낸 발화 수. speak 의 id 를 만드는 데 쓴다. */
 let turnSeq = 0;
@@ -167,8 +179,14 @@ function onEngineEvent(event: EngineEvent): void {
       const startingSession = !state.hasMemory;
       openWindow(false); // 포커스는 훔치지 않는다 (7.2절)
       // 소리는 세션을 시작할 때만 낸다. 매 턴 효과음이 울리면 시끄럽다.
-      if (startingSession) sendToRenderer(IPC.playSound, 'boot');
-      // TODO(M4): 세션 시작이면 음악 재생도 여기서 시작한다.
+      if (startingSession) {
+        sendToRenderer(IPC.playSound, 'boot');
+        // 7.1절 기동 경험: 부팅음과 함께 음악이 시작된다.
+        // 단, 사용자가 직접 멈춘 음악은 되살리지 않는다 (9절).
+        if (!musicState?.stoppedByUser) {
+          sendToRenderer(IPC.musicControl, { type: 'play' } satisfies MusicControl);
+        }
+      }
       engine.send({ type: 'listen.start' });
       state.openListenWindow();
       break;
@@ -188,14 +206,21 @@ function onEngineEvent(event: EngineEvent): void {
       }
       break;
 
-    case 'transcript':
+    case 'transcript': {
       if (event.discarded) {
         // 8.5절 환각 방지에 걸린 것. 조용히 대기로 돌아간다.
         if (state.state !== 'speaking') state.transition('idle');
         break;
       }
+      // 음악 조작은 뇌를 거치지 않는다. 왕복 3초를 기다릴 이유가 없다 (9절).
+      const command = matchMusicCommand(event.text);
+      if (command) {
+        handleMusicCommand(command, event.text);
+        break;
+      }
       void handleUserTurn(event.text);
       break;
+    }
 
     case 'speak.begin':
       state.transition('speaking');
@@ -224,6 +249,25 @@ function onEngineEvent(event: EngineEvent): void {
     case 'metrics':
       sendToRenderer(IPC.turnUpdated, event);
       break;
+  }
+}
+
+/**
+ * 음성으로 온 음악 조작을 처리한다.
+ *
+ * 뇌를 거치지 않으므로 즉시 반응한다. 대신 무엇을 했는지 짧게 말해 준다 —
+ * 아무 반응이 없으면 못 알아들은 것과 구분되지 않는다.
+ */
+function handleMusicCommand(command: MusicControl, heard: string): void {
+  sendToRenderer(IPC.turnUpdated, { role: 'user', text: heard, done: true });
+  sendToRenderer(IPC.musicControl, command);
+
+  const reply = acknowledge(command);
+  if (reply) {
+    sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: reply, done: true });
+    engine.send({ type: 'speak', id: `m${(turnSeq += 1)}`, text: reply });
+  } else {
+    state.openListenWindow();
   }
 }
 
@@ -298,12 +342,19 @@ async function bootstrap(): Promise<void> {
     );
   }
 
-  // 1×1 투명 이미지 + setTitle 로 텍스트 아이콘. M3 에서 실제 아이콘으로 교체.
+  music.registerHandler();
+  await music.load();
+  if (music.folder) {
+    console.log(`[music] ${music.list.length}곡 · ${music.folder}`);
+  }
+
+  // 1×1 투명 이미지 + setTitle 로 텍스트 아이콘. M6 에서 실제 아이콘으로 교체.
   tray = new Tray(nativeImage.createEmpty());
   refreshTray();
 
   state.on('change', (next: GoliathState) => {
     refreshTray();
+    // 덕킹은 렌더러가 건다 (원칙 2). 상태만 넘기면 된다.
     sendToRenderer(IPC.stateChanged, next);
   });
   state.on('releaseModels', () => engine.send({ type: 'models.release' }));
@@ -334,7 +385,33 @@ async function bootstrap(): Promise<void> {
     if (payload.type === 'toggle-active') toggleActive();
     if (payload.type === 'open-window') openWindow();
   });
+  ipcMain.on(IPC.musicState, (_event, next: MusicState) => {
+    musicState = next;
+    void music.setVolume(next.volume);
+    void music.setStartIndex(next.index);
+  });
+  ipcMain.on(IPC.musicControl, (_event, control: MusicControl) => {
+    sendToRenderer(IPC.musicControl, control);
+  });
   ipcMain.handle('goliath:get-state', () => state.state);
+  ipcMain.handle('goliath:music-library', () => ({
+    tracks: music.list,
+    folder: music.folder,
+    startIndex: music.startIndex,
+    volume: music.volume,
+  }));
+  ipcMain.handle('goliath:choose-music-folder', async () => {
+    const ok = await music.chooseFolder();
+    if (ok) {
+      sendToRenderer(IPC.musicLibrary, {
+        tracks: music.list,
+        folder: music.folder,
+        startIndex: 0,
+        volume: music.volume,
+      });
+    }
+    return ok;
+  });
 }
 
 function shutdown(): void {
@@ -343,6 +420,9 @@ function shutdown(): void {
     app.exit(0);
   });
 }
+
+// 커스텀 스킴은 앱이 준비되기 전에 등록해야 한다.
+MusicLibrary.registerScheme();
 
 app.whenReady().then(() => {
   // 4.3절: 시작 시 창을 띄우지 않고 메뉴바에만 나타난다.

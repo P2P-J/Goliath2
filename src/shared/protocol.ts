@@ -207,8 +207,12 @@ export const IPC = {
   turnUpdated: 'goliath:turn-updated',
   /** 메인 → 렌더러: 효과음 재생 요청 (6절). 합성은 렌더러가 Web Audio로 한다. */
   playSound: 'goliath:play-sound',
-  /** 렌더러 → 메인: 음악 재생 상태 통보 (덕킹 복귀 판단에 필요 — 3.4절). */
+  /** 렌더러 → 메인: 음악 재생 상태 통보 (덕킹 복귀 판단에 필요 — 9절). */
   musicState: 'goliath:music-state',
+  /** 메인 → 렌더러: 재생목록 갱신. */
+  musicLibrary: 'goliath:music-library',
+  /** 메인 → 렌더러: 음악 제어 명령 (음성 명령과 기동 시퀀스가 여기로 온다). */
+  musicControl: 'goliath:music-control',
   /** 렌더러 → 메인: 사용자 조작 (토글, 설정 변경 등). */
   command: 'goliath:command',
 } as const;
@@ -223,7 +227,7 @@ export type SoundEvent =
   | 'idle-return'
   | 'device-switch';
 
-/** 3.4절 덕킹. 상태별 음악 볼륨. */
+/** 9절 덕킹. 상태별 음악 볼륨. */
 export const DUCK_LEVELS: Record<GoliathState, number> = {
   inactive: 1.0,
   idle: 1.0,
@@ -234,7 +238,56 @@ export const DUCK_LEVELS: Record<GoliathState, number> = {
   speaking: 0.2,
 };
 
+// ---------------------------------------------------------------------------
+// 음악 (기획서 9절). 원칙 2: 재생은 렌더러가 한다.
+// ---------------------------------------------------------------------------
+
+export interface Track {
+  /** goliath-media:// URL. 렌더러가 이걸로 재생한다. */
+  url: string;
+  /** 화면에 보일 이름 (확장자 없는 파일명). */
+  title: string;
+  /** 원본 파일 경로. 화면에는 보이지 않고 정렬·중복 제거에 쓴다. */
+  path: string;
+}
+
+export type MusicControl =
+  | { type: 'play'; index?: number }
+  | { type: 'pause' }
+  | { type: 'toggle' }
+  | { type: 'next' }
+  | { type: 'previous' }
+  | { type: 'stop' }
+  | { type: 'volume'; value: number }
+  | { type: 'seek'; seconds: number };
+
+export interface MusicState {
+  playing: boolean;
+  index: number;
+  title: string | null;
+  position: number;
+  duration: number;
+  volume: number;
+  /**
+   * 사용자가 직접 멈췄는가.
+   *
+   * 9절: 사용자가 직접 정지시킨 음악은 대화가 끝나도 자동 재생되지 않는다.
+   * 덕킹으로 잠깐 줄어든 것과 사용자가 끈 것은 다르다.
+   */
+  stoppedByUser: boolean;
+}
+
 /** 2.2절 두 개의 타이머. 혼동하기 쉬우므로 상수로 못 박는다. */
+export const MUSIC = {
+  /** 재생목록으로 삼을 확장자. */
+  extensions: ['.mp3', '.m4a', '.aac', '.wav', '.flac', '.ogg'],
+  /** 덕킹 페이드 (9절). 줄일 때는 빠르게, 되돌릴 때는 느긋하게. */
+  duckFadeMs: 300,
+  restoreFadeMs: 500,
+  /** 커스텀 스킴. 렌더러가 로컬 파일을 읽는 통로다. */
+  scheme: 'goliath-media',
+} as const;
+
 export const TIMERS = {
   /** 청취 창: 답한 뒤 웨이크워드 없이 말을 걸 수 있는 시간. */
   listenWindowMs: 15_000,
