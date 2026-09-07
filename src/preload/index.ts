@@ -6,6 +6,7 @@ import {
   type MusicControl,
   type MusicState,
   type SoundEvent,
+  type VoiceSettings,
 } from '@shared/protocol';
 
 interface Library {
@@ -80,6 +81,21 @@ const api = {
 
   getState(): Promise<GoliathState> {
     return ipcRenderer.invoke('goliath:get-state');
+  },
+
+  // -- 목소리 설정 (3장). 엔진은 처음부터 config.set 을 받고 있었다. ------
+
+  getVoice(): Promise<VoiceSettings> {
+    return ipcRenderer.invoke('goliath:get-voice');
+  },
+
+  setVoice(next: Partial<VoiceSettings>): Promise<VoiceSettings> {
+    return ipcRenderer.invoke('goliath:set-voice', next);
+  },
+
+  /** 지금 고른 목소리로 한 마디 시켜 본다. */
+  previewVoice(): void {
+    ipcRenderer.send('goliath:preview-voice');
   },
 };
 

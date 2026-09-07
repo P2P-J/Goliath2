@@ -7,6 +7,7 @@ import {
   type GoliathState,
   type MusicControl,
   type MusicState,
+  type VoiceSettings,
 } from '@shared/protocol';
 import { VoiceEngine } from './engine';
 import { ConversationState } from './state';
@@ -16,6 +17,7 @@ import { ClaudeApiBrain } from './brain-claude-api';
 import { filterForSpeech } from './speech-filter';
 import { KEYS, migrateEnvFile } from './keychain';
 import { MusicLibrary } from './music';
+import { VoiceStore } from './settings';
 import { acknowledge, matchMusicCommand } from './voice-commands';
 
 /**
@@ -41,6 +43,7 @@ const brain: Brain =
   process.env.GOLIATH_BRAIN === 'api' ? new ClaudeApiBrain() : new ClaudeSubscriptionBrain();
 
 const music = new MusicLibrary();
+const voice = new VoiceStore();
 /** 렌더러가 알려주는 재생 상태. 자동 재생 여부 판단에 쓴다 (9절). */
 let musicState: MusicState | null = null;
 
@@ -56,6 +59,9 @@ let turnSeq = 0;
  * 끝나야 답이 끝난 것이다.
  */
 const pendingSpeech = new Set<string>();
+
+/** 미리듣기 발화의 id 앞머리. 대화 상태를 건드리지 않고 지나간다. */
+const PREVIEW_ID = 'preview:';
 
 /** 발화를 보내면서 미결 목록에 올린다. speak 는 반드시 이 함수를 거친다. */
 function speak(id: string, text: string, queue = false): void {
@@ -192,6 +198,9 @@ function onEngineEvent(event: EngineEvent): void {
       // 엔진이 되살아났다. 죽은 발화의 id 가 남아 있으면 청취 창이 영영
       // 열리지 않는다.
       pendingSpeech.clear();
+      // 엔진은 기본값으로 뜬다. 저장된 목소리가 있으면 여기서 덮어쓴다 —
+      // 재기동한 경우에도 사용자가 고른 목소리로 돌아온다.
+      engine.send({ type: 'config.set', config: voice.value });
       // 4.4절 부팅 멘트는 맥북을 켜고 앱이 처음 실행될 때 한 번만.
       if (state.needsBootAnnouncement) {
         state.markBootAnnounced();
@@ -256,10 +265,12 @@ function onEngineEvent(event: EngineEvent): void {
     }
 
     case 'speak.begin':
+      if (event.id.startsWith(PREVIEW_ID)) break;
       state.transition('speaking');
       break;
 
     case 'speak.end':
+      if (event.id.startsWith(PREVIEW_ID)) break;
       pendingSpeech.delete(event.id);
       // 남은 문장이 없을 때만 청취 창을 연다. 'speaking' 이 아니면 이미
       // 다음 턴이 시작된 것이므로 건드리지 않는다.
@@ -375,6 +386,8 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  await voice.load();
+
   music.registerHandler();
   await music.load();
   if (music.folder) {
@@ -427,6 +440,22 @@ async function bootstrap(): Promise<void> {
     sendToRenderer(IPC.musicControl, control);
   });
   ipcMain.handle('goliath:get-state', () => state.state);
+  ipcMain.handle('goliath:get-voice', () => voice.value);
+  ipcMain.handle('goliath:set-voice', async (_event, next: Partial<VoiceSettings>) => {
+    const applied = await voice.update(next);
+    engine.send({ type: 'config.set', config: applied });
+    return applied;
+  });
+  ipcMain.on('goliath:preview-voice', () => {
+    // 고른 목소리를 바로 들려준다. 글로만 고르면 열 종을 구분할 수 없다.
+    // speak() 를 거치지 않는다 — 미리듣기는 대화가 아니므로 상태도 청취 창도
+    // 건드리면 안 된다. 목소리를 훑어보다 말고 대화가 시작되면 곤란하다.
+    engine.send({
+      type: 'speak',
+      id: `${PREVIEW_ID}${(turnSeq += 1)}`,
+      text: '골리앗 온라인. 명령을 기다립니다.',
+    });
+  });
   ipcMain.handle('goliath:music-library', () => ({
     tracks: music.list,
     folder: music.folder,

@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   DUCK_LEVELS,
+  PRESETS,
+  VOICES,
   type GoliathState,
   type MusicState,
   type SoundEvent,
   type Track,
+  type VoiceSettings,
 } from '@shared/protocol';
 import { MusicPlayer } from './music';
 import { SoundBoard } from './sounds';
@@ -80,7 +83,7 @@ const TOOL_LABEL: Record<string, string> = {
 export function App() {
   const [state, setState] = useState<GoliathState>('inactive');
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [tab, setTab] = useState<'대화' | '재생목록'>('대화');
+  const [tab, setTab] = useState<'대화' | '재생목록' | '설정'>('대화');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [music, setMusic] = useState<MusicState | null>(null);
@@ -170,7 +173,7 @@ export function App() {
       <aside style={S.sidebar}>
         <div style={S.brand}>골리앗</div>
         <nav style={S.nav}>
-          {(['대화', '재생목록'] as const).map((item) => (
+          {(['대화', '재생목록', '설정'] as const).map((item) => (
             <div
               key={item}
               onClick={() => setTab(item)}
@@ -212,7 +215,9 @@ export function App() {
           {HINT[state] ? <span style={S.statusHint}>{HINT[state]}</span> : null}
         </div>
 
-        {tab === '재생목록' ? (
+        {tab === '설정' ? (
+          <Settings />
+        ) : tab === '재생목록' ? (
           <Playlist
             tracks={tracks}
             folder={folder}
@@ -235,6 +240,80 @@ export function App() {
       </main>
 
       {music?.title ? <MiniPlayer music={music} /> : null}
+    </div>
+  );
+}
+
+/**
+ * 목소리 설정 (기획서 3장).
+ *
+ * 고르는 즉시 엔진에 반영되고 파일에 저장된다. "저장" 단추가 없는 이유는
+ * 목소리는 들어봐야 아는 것이라 고르기와 확인이 같은 동작이어야 하기 때문이다.
+ */
+function Settings() {
+  const [v, setV] = useState<VoiceSettings | null>(null);
+
+  useEffect(() => {
+    void window.goliath.getVoice().then(setV);
+  }, []);
+
+  if (!v) return <div style={S.stream} />;
+
+  // 바꾼 값을 곧바로 보내고, 돌아온 최종값(범위가 접힌 값)으로 화면을 맞춘다.
+  const change = (next: Partial<VoiceSettings>) => {
+    setV({ ...v, ...next });
+    void window.goliath.setVoice(next).then(setV);
+  };
+
+  return (
+    <div style={{ ...S.stream, gap: 26 }}>
+      <section style={S.section}>
+        <div style={S.sectionTitle}>목소리</div>
+        <div style={S.voiceGrid}>
+          {VOICES.map((item) => (
+            <div
+              key={item.id}
+              onClick={() => change({ voice: item.id })}
+              style={{ ...S.chip, ...(v.voice === item.id ? S.chipOn : null) }}
+            >
+              {item.label}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section style={S.section}>
+        <div style={S.sectionTitle}>음향 프리셋</div>
+        {PRESETS.map((p) => (
+          <div
+            key={p.id}
+            onClick={() => change({ preset: p.id })}
+            style={{ ...S.presetRow, ...(v.preset === p.id ? S.presetOn : null) }}
+          >
+            <span style={S.presetName}>{p.label}</span>
+            <span style={S.presetHint}>{p.hint}</span>
+          </div>
+        ))}
+      </section>
+
+      <section style={S.section}>
+        <div style={S.sectionTitle}>말 속도 · {v.speed.toFixed(2)}배</div>
+        <input
+          type="range" min={0.7} max={2.0} step={0.01} value={v.speed}
+          onChange={(e) => change({ speed: Number(e.target.value) })}
+          style={S.slider}
+        />
+        <div style={S.sectionTitle}>음높이 · {v.pitchFactor.toFixed(2)}배 낮춤</div>
+        <input
+          type="range" min={1.0} max={1.3} step={0.01} value={v.pitchFactor}
+          onChange={(e) => change({ pitchFactor: Number(e.target.value) })}
+          style={S.slider}
+        />
+      </section>
+
+      <button style={S.button} onClick={() => window.goliath.previewVoice()}>
+        들어보기
+      </button>
     </div>
   );
 }
@@ -401,6 +480,23 @@ const S: Record<string, React.CSSProperties> = {
   empty: { minHeight: '60vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 },
   emptyTitle: { fontSize: 18, letterSpacing: '0.08em', color: '#3d4b5c' },
   emptyHint: { fontSize: 13, color: '#39424e' },
+
+  section: { display: 'flex', flexDirection: 'column', gap: 9 },
+  sectionTitle: { fontSize: 12, color: '#6b7684', letterSpacing: '0.04em' },
+  voiceGrid: { display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 7 },
+  chip: {
+    padding: '9px 0', borderRadius: 7, textAlign: 'center', cursor: 'pointer',
+    border: '1px solid #232a33', background: '#141920', color: '#8b95a3', fontSize: 12.5,
+  },
+  chipOn: { borderColor: '#4fd1a3', color: '#4fd1a3', background: '#101a17' },
+  presetRow: {
+    display: 'flex', alignItems: 'baseline', gap: 12, padding: '9px 13px',
+    borderRadius: 7, cursor: 'pointer', border: '1px solid #1a1f26',
+  },
+  presetOn: { borderColor: '#4fd1a3', background: '#101a17' },
+  presetName: { fontSize: 13.5, minWidth: 52 },
+  presetHint: { fontSize: 12, color: '#6b7684' },
+  slider: { width: '100%', accentColor: '#4fd1a3' },
 
   folderRow: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 8 },
   folderPath: { fontSize: 11.5, color: '#6b7684', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

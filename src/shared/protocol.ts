@@ -44,6 +44,35 @@ export type GoliathState =
 /** 음향 캐릭터 프리셋. engine/goliath_engine/audio_fx.py 와 짝을 이룬다. */
 export type VoicePreset = 'none' | 'jarvis' | 'goliath';
 
+/** 수퍼토닉 기본 보이스 10종. 설정 화면이 이 목록을 그대로 쓴다. */
+export const VOICES = [
+  { id: 'M1', label: 'M1 · 남성' },
+  { id: 'M2', label: 'M2 · 남성' },
+  { id: 'M3', label: 'M3 · 남성' },
+  { id: 'M4', label: 'M4 · 남성' },
+  { id: 'M5', label: 'M5 · 남성' },
+  { id: 'F1', label: 'F1 · 여성' },
+  { id: 'F2', label: 'F2 · 여성' },
+  { id: 'F3', label: 'F3 · 여성' },
+  { id: 'F4', label: 'F4 · 여성' },
+  { id: 'F5', label: 'F5 · 여성' },
+] as const;
+
+/** 프리셋 이름과 한 줄 설명. 골라야 하는 사람에게 필요한 것은 이것뿐이다. */
+export const PRESETS: { id: VoicePreset; label: string; hint: string }[] = [
+  { id: 'jarvis', label: '자비스', hint: '맑고 가벼운 금속성. 기본값' },
+  { id: 'goliath', label: '골리앗', hint: '낮고 무거운 기계음' },
+  { id: 'none', label: '없음', hint: '가공하지 않은 원래 목소리' },
+];
+
+/** 설정 화면이 다루는 목소리 값. EngineConfig 의 부분집합이다. */
+export interface VoiceSettings {
+  voice: string;
+  preset: VoicePreset;
+  speed: number;
+  pitchFactor: number;
+}
+
 /**
  * 기본 음성 설정 — M1 보이스 + 자비스 프리셋.
  * 10종을 직접 청취해 확정했다 (bench/make_voice_samples.py).
