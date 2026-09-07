@@ -39,6 +39,15 @@ export class ClaudeSubscriptionBrain implements Brain {
     aborted: boolean;
   } | null = null;
 
+  /**
+   * 밀려난 턴이 남길 출력의 수.
+   *
+   * 세션 스트림은 순서가 보장된다 — 앞 턴의 델타와 result 가 모두 지나간
+   * 뒤에야 새 턴의 것이 온다. 그 전까지 오는 것은 전부 앞 턴의 잔여물이며,
+   * 새 턴에 흘려 넣으면 새 턴이 앞 턴의 result 로 끝나 답이 사라진다.
+   */
+  private staleResults = 0;
+
   private readonly model: string;
 
   constructor(model = 'claude-sonnet-5') {
@@ -78,6 +87,7 @@ export class ClaudeSubscriptionBrain implements Brain {
     this.session = null;
     this.closed = false;
     this.inbox = [];
+    this.staleResults = 0;
   }
 
   // -- 입력 스트림 -------------------------------------------------------
@@ -149,6 +159,11 @@ export class ClaudeSubscriptionBrain implements Brain {
     if (!this.session) return;
 
     for await (const message of this.session) {
+      if (this.staleResults > 0) {
+        // 밀려난 턴의 잔여물. result 까지 삼키고 나면 새 턴이 흐른다.
+        if (message.type === 'result') this.staleResults -= 1;
+        continue;
+      }
       const turn = this.turn;
       if (!turn) continue;
 
@@ -189,9 +204,18 @@ export class ClaudeSubscriptionBrain implements Brain {
   // -- 한 턴 -------------------------------------------------------------
 
   async ask(userText: string, events: BrainEvents): Promise<string> {
-    if (this.turn) {
-      // 앞 턴이 아직 끝나지 않았다. 밀어낸다 (사용자가 새 명령을 내린 것).
-      this.abort();
+    const displaced = this.turn;
+    if (displaced) {
+      // 앞 턴이 아직 끝나지 않았다 (사용자가 새 명령을 내린 것).
+      // **여기서 반드시 매듭지어야 한다.** 그러지 않으면 앞 턴의 await 가
+      // 영원히 걸린 채 남는다.
+      displaced.aborted = true;
+      this.turn = null;
+      this.staleResults += 1;
+      void this.session?.interrupt().catch(() => {
+        /* 이미 끝났으면 무시 */
+      });
+      displaced.finish(displaced.full);
     }
 
     this.ensureSession();

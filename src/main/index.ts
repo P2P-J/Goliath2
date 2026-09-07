@@ -47,6 +47,31 @@ let musicState: MusicState | null = null;
 /** 이번 턴에 엔진으로 보낸 발화 수. speak 의 id 를 만드는 데 쓴다. */
 let turnSeq = 0;
 
+/**
+ * 엔진에 보냈고 아직 끝나지 않은 발화의 id.
+ *
+ * 답을 문장 단위로 흘려보내므로 한 턴에 speak 가 여러 번 나가고, speak.end
+ * 도 문장마다 온다. 그때마다 청취 창을 열면 답하는 도중에 화면이
+ * "듣고 있습니다"로 깜빡이고 사용자는 말해도 되는 줄 안다. 마지막 문장이
+ * 끝나야 답이 끝난 것이다.
+ */
+const pendingSpeech = new Set<string>();
+
+/** 발화를 보내면서 미결 목록에 올린다. speak 는 반드시 이 함수를 거친다. */
+function speak(id: string, text: string, queue = false): void {
+  pendingSpeech.add(id);
+  engine.send({ type: 'speak', id, text, queue });
+}
+
+/**
+ * 진행 중인 턴. 한 번에 하나만 돌린다.
+ *
+ * 뇌가 생각하는 동안에도 귀는 열려 있어서 두 번째 발화가 들어올 수 있다.
+ * 그대로 두면 brain.ask 가 겹쳐 호출되는데, 앞 턴의 result 가 뒤 턴을
+ * 대신 끝내 버려 두 번째 질문의 답이 통째로 사라진다.
+ */
+let turnChain: Promise<void> = Promise.resolve();
+
 /** 메뉴바 아이콘이 표시하는 상태 (4.1절). */
 const STATE_LABEL: Record<GoliathState, string> = {
   inactive: '비활성',
@@ -164,6 +189,9 @@ function toggleActive(): void {
 function onEngineEvent(event: EngineEvent): void {
   switch (event.type) {
     case 'ready':
+      // 엔진이 되살아났다. 죽은 발화의 id 가 남아 있으면 청취 창이 영영
+      // 열리지 않는다.
+      pendingSpeech.clear();
       // 4.4절 부팅 멘트는 맥북을 켜고 앱이 처음 실행될 때 한 번만.
       if (state.needsBootAnnouncement) {
         state.markBootAnnounced();
@@ -208,8 +236,12 @@ function onEngineEvent(event: EngineEvent): void {
 
     case 'transcript': {
       if (event.discarded) {
-        // 8.5절 환각 방지에 걸린 것. 조용히 대기로 돌아간다.
-        if (state.state !== 'speaking') state.transition('idle');
+        // 8.5절 환각 방지에 걸린 것. 기침 한 번, 키보드 소리 한 번에도
+        // 걸리므로 대기로 내리면 안 된다 — 엔진의 청취 창은 그대로 열려
+        // 있는데 화면만 "대기 중"이 되어 상태가 어긋난다.
+        if (state.state === 'transcribing' || state.state === 'listening') {
+          state.openListenWindow();
+        }
         break;
       }
       // 음악 조작은 뇌를 거치지 않는다. 왕복 3초를 기다릴 이유가 없다 (9절).
@@ -218,7 +250,8 @@ function onEngineEvent(event: EngineEvent): void {
         handleMusicCommand(command, event.text);
         break;
       }
-      void handleUserTurn(event.text);
+      // 앞 턴이 끝난 뒤에 시작한다. 겹쳐 돌리면 답이 뒤섞인다.
+      turnChain = turnChain.then(() => handleUserTurn(event.text));
       break;
     }
 
@@ -227,8 +260,12 @@ function onEngineEvent(event: EngineEvent): void {
       break;
 
     case 'speak.end':
-      // 답을 마쳤으니 청취 창을 연다 (2.2절).
-      state.openListenWindow();
+      pendingSpeech.delete(event.id);
+      // 남은 문장이 없을 때만 청취 창을 연다. 'speaking' 이 아니면 이미
+      // 다음 턴이 시작된 것이므로 건드리지 않는다.
+      if (pendingSpeech.size === 0 && state.state === 'speaking') {
+        state.openListenWindow();
+      }
       break;
 
     case 'device':
@@ -265,7 +302,7 @@ function handleMusicCommand(command: MusicControl, heard: string): void {
   const reply = acknowledge(command);
   if (reply) {
     sendToRenderer(IPC.turnUpdated, { role: 'assistant', text: reply, done: true });
-    engine.send({ type: 'speak', id: `m${(turnSeq += 1)}`, text: reply });
+    speak(`m${(turnSeq += 1)}`, reply);
   } else {
     state.openListenWindow();
   }
@@ -290,12 +327,8 @@ async function handleUserTurn(text: string): Promise<void> {
       // 8.2절 이중 방어: 프롬프트가 규칙을 어겨도 여기서 걸러진다.
       const { speech } = filterForSpeech(sentence);
       if (!speech) return;
-      engine.send({
-        type: 'speak',
-        id: `t${turn}s${spoken}`,
-        text: speech,
-        queue: spoken > 0, // 첫 문장만 앞을 밀어내고, 이후는 이어 말한다
-      });
+      // 첫 문장만 앞을 밀어내고, 이후는 이어 말한다.
+      speak(`t${turn}s${spoken}`, speech, spoken > 0);
       spoken += 1;
     },
     onText: (fullText) => {
@@ -307,7 +340,7 @@ async function handleUserTurn(text: string): Promise<void> {
     onError: (message) => {
       console.error(`[brain] ${message}`);
       sendToRenderer(IPC.turnUpdated, { role: 'error', text: message, done: true });
-      engine.send({ type: 'speak', id: `t${turn}err`, text: message });
+      speak(`t${turn}err`, message);
     },
   };
 

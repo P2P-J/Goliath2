@@ -91,7 +91,10 @@ export class ConversationState extends EventEmitter {
 
   /** 답을 마친 직후 호출한다. 웨이크워드 없이 이어 말할 수 있는 창을 연다. */
   openListenWindow(): void {
-    this.transition('listening');
+    // 이미 열려 있으면 전이는 없지만 15초는 다시 되감아야 한다.
+    // transition 은 같은 상태면 아무것도 하지 않는다.
+    if (this.current === 'listening') this.startListenWindow();
+    else this.transition('listening');
   }
 
   private startListenWindow(): void {

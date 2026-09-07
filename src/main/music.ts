@@ -153,13 +153,23 @@ export class MusicLibrary {
     return Math.min(this.settings.startIndex, Math.max(0, this.tracks.length - 1));
   }
 
+  /**
+   * 값이 실제로 바뀔 때만 기록한다.
+   *
+   * 렌더러는 timeupdate 마다(초당 약 4회) 재생 상태를 보고한다. 그대로
+   * 저장하면 음악을 트는 내내 초당 여덟 번씩 music.json 을 다시 쓴다.
+   */
   async setVolume(value: number): Promise<void> {
-    this.settings.volume = Math.max(0, Math.min(1, value));
+    const next = Math.max(0, Math.min(1, value));
+    if (next === this.settings.volume) return;
+    this.settings.volume = next;
     await this.save();
   }
 
   async setStartIndex(index: number): Promise<void> {
-    this.settings.startIndex = Math.max(0, index);
+    const next = Math.max(0, index);
+    if (next === this.settings.startIndex) return;
+    this.settings.startIndex = next;
     await this.save();
   }
 }

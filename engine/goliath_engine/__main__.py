@@ -107,6 +107,10 @@ class Engine:
 
         self._speaking_id: str | None = None
         self._speak_thread: threading.Thread | None = None
+        #: 발화 세대. 취소하면 하나 올라가고, 이전 세대의 문장은 말하지 않는다.
+        #: 문장 단위로 큐에 쌓이므로 "지금 나오는 소리"만 끊으면 나머지가
+        #: 그대로 이어진다 — 끼어들기가 한 문장만 멈추는 버그의 원인이었다.
+        self._speak_gen = 0
         self._loop_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -444,7 +448,10 @@ class Engine:
             # queue 면 앞 발화를 끝까지 두고 뒤에 붙는다. Claude 응답을
             # 문장 단위로 흘려보낼 때 쓴다 — 매번 취소하면 첫 문장만 들린다.
             if self._speaking_id is not None and not queue:
+                # 새 발화가 앞 턴을 밀어낸다. 큐에 남은 문장까지 전부 무효다.
+                self._speak_gen += 1
                 self.tts.cancel()
+            gen = self._speak_gen
             self._speaking_id = speak_id
             self._interrupt_fired = False
 
@@ -458,7 +465,15 @@ class Engine:
             # 두 목소리가 동시에 들린다.
             if previous is not None and previous.is_alive():
                 previous.join(timeout=60.0 if queue else 3.0)
+            completed = False
             try:
+                with self._lock:
+                    stale = gen != self._speak_gen
+                if stale:
+                    # 취소된 턴에 딸린 문장이다. TtsBackend.speak 은 시작할 때
+                    # 취소 플래그를 지우므로, 여기서 막지 않으면 끼어들기가
+                    # 현재 문장만 끊고 나머지는 그대로 이어 말한다.
+                    return
                 completed = self.tts.speak(
                     self._speech_request(text),
                     on_first_audio=lambda ms: self.ch.speak_begin(speak_id, ms),
@@ -477,7 +492,9 @@ class Engine:
                     # 다음 수집의 프리롤로 그대로 딸려 들어간다.
                     self.mic.take_preroll()
                     self.collector.abort()
-            self.ch.speak_end(speak_id, cancelled=not completed)
+                # 말하지 않고 건너뛴 문장도 speak.end 를 낸다. 메인이 남은
+                # 발화 수를 세고 있어서, 빠뜨리면 청취 창이 열리지 않는다.
+                self.ch.speak_end(speak_id, cancelled=not completed)
 
         self._speak_thread = threading.Thread(target=run, daemon=True)
         self._speak_thread.start()
@@ -485,7 +502,11 @@ class Engine:
     def _on_speak_cancel(self, cmd: dict[str, Any]) -> None:
         with self._lock:
             current = self._speaking_id
-        if current is not None and cmd.get("id") in (None, "current", current):
+            hit = current is not None and cmd.get("id") in (None, "current", current)
+            if hit:
+                # 지금 나오는 소리뿐 아니라 큐에 쌓인 나머지 문장까지 버린다.
+                self._speak_gen += 1
+        if hit:
             self.tts.cancel()
 
     def _on_models_release(self, _cmd: dict[str, Any]) -> None:
