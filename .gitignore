@@ -30,3 +30,4 @@ samples/voices/
 
 # 임시 시험 산출물
 out-test/
+.playwright-mcp/
