@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { SYSTEM_PROMPT, type Brain, type BrainEvents } from './brain';
@@ -20,6 +22,17 @@ import { takeCompleteSentences } from './speech-filter';
  * 하니스(약 22k 토큰)를 매 턴 싣기 때문이며 줄일 수 없다. 문장 단위로
  * 말하기 시작하므로 체감은 그보다 짧다.
  */
+/**
+ * 골리앗이 쓸 수 있는 도구 (기획서 6.1절).
+ *
+ * 읽고 찾는 것까지만 연다. 되돌릴 수 없는 일을 하는 도구(Bash·Write·Edit)는
+ * 넣지 않는다 — 상시 대기하는 마이크가 잘못 들은 말로 그것을 하면 안 된다.
+ *
+ * 실측으로 이름을 확인했다. 이 목록을 벗어난 도구는 모델의 맥락에서 아예
+ * 사라진다 — "ls 를 실행해줘"라고 하면 "그 도구가 없습니다"라고 답한다.
+ */
+const READ_ONLY_TOOLS = ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'];
+
 export class ClaudeSubscriptionBrain implements Brain {
   readonly name = 'claude-subscription';
 
@@ -127,12 +140,24 @@ export class ClaudeSubscriptionBrain implements Brain {
       options: {
         model: this.model,
         systemPrompt: SYSTEM_PROMPT,
+        // 도구를 읽기·검색으로 좁혔으므로 승인 절차 없이 바로 실행한다.
+        // 음성 대화 중에 승인 창이 뜨면 답할 방법이 없어 턴이 멈춘다.
         permissionMode: 'bypassPermissions',
         // 프로젝트의 CLAUDE.md 나 설정을 끌어오지 않는다. 골리앗은
         // 코딩 에이전트가 아니라 비서다.
         settingSources: [],
-        // 도구는 M6 에서 붙인다. 지금은 대화만.
-        allowedTools: [],
+        // **실제 제한은 tools 다.** allowedTools 는 "물어보지 않고 실행할 것"
+        // 목록일 뿐이라, 예전의 allowedTools: [] 는 아무것도 막지 못했다 —
+        // bypassPermissions 와 합쳐져 Bash 까지 승인 없이 돌고 있었다(실측 확인).
+        //
+        // 상시 대기하는 마이크가 잘못 들은 말로 무엇을 실행해서는 안 된다.
+        // Whisper 는 환각을 낸다(기획서 8.5절). 되돌릴 수 없는 일을 하는 도구는
+        // 넣지 않는다 — Bash·Write·Edit 가 여기 없는 이유다.
+        tools: READ_ONLY_TOOLS,
+        allowedTools: READ_ONLY_TOOLS,
+        // 파일을 물어보면 홈에서 찾는다. 앱을 어디서 띄웠든 "바탕화면의 저 파일"이
+        // 통해야 한다 — 기본값은 프로세스의 실행 위치라 프로젝트 폴더가 된다.
+        cwd: homedir(),
         includePartialMessages: true,
         // 실측 (sonnet-5, 따뜻한 턴 기준 첫 문장까지)
         //   기본(adaptive)        4531ms

@@ -44,6 +44,20 @@ export type GoliathState =
 /** 음향 캐릭터 프리셋. engine/goliath_engine/audio_fx.py 와 짝을 이룬다. */
 export type VoicePreset = 'none' | 'jarvis' | 'goliath';
 
+/**
+ * 도구 이름을 사람의 말로 (기획서 6.1절).
+ *
+ * Agent SDK 가 주는 이름은 `WebSearch` 같은 코드 이름이다. 화면에 그대로
+ * 띄우면 무슨 일이 벌어지는지 알 수 없다. 목록에 없으면 이름을 그대로 쓴다.
+ */
+export const TOOL_LABEL: Record<string, string> = {
+  WebSearch: '웹을 검색하고 있습니다',
+  WebFetch: '문서를 읽고 있습니다',
+  Read: '파일을 읽고 있습니다',
+  Glob: '파일을 찾고 있습니다',
+  Grep: '내용을 뒤지고 있습니다',
+};
+
 /** 수퍼토닉 기본 보이스 10종. 설정 화면이 이 목록을 그대로 쓴다. */
 export const VOICES = [
   { id: 'M1', label: 'M1 · 남성' },

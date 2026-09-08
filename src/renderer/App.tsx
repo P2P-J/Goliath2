@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   DUCK_LEVELS,
   PRESETS,
+  TOOL_LABEL,
   VOICES,
   type GoliathState,
   type MusicState,
@@ -73,12 +74,6 @@ interface Update {
   text: string;
   done: boolean;
 }
-
-const TOOL_LABEL: Record<string, string> = {
-  web_search: '웹을 검색하고 있습니다',
-  web_fetch: '문서를 읽고 있습니다',
-  code_execution: '코드를 실행하고 있습니다',
-};
 
 export function App() {
   const [state, setState] = useState<GoliathState>('inactive');
