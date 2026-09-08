@@ -1,5 +1,5 @@
 import { app, dialog, net, protocol } from 'electron';
-import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { extname, basename, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -51,14 +51,29 @@ export class MusicLibrary {
   }
 
   registerHandler(): void {
-    protocol.handle(MUSIC.scheme, (request) => {
+    protocol.handle(MUSIC.scheme, async (request) => {
       const target = decodeURIComponent(new URL(request.url).pathname);
       const folder = this.settings.folder;
       // 폴더 밖은 내주지 않는다. 렌더러가 임의 경로를 요청해도 막힌다.
       if (!folder || !resolve(target).startsWith(resolve(folder) + sep)) {
         return new Response('not found', { status: 404 });
       }
-      return net.fetch(pathToFileURL(target).toString());
+
+      const response = await net.fetch(pathToFileURL(target).toString());
+      // 길이를 실어 주지 않으면 <audio> 의 duration 이 Infinity 가 된다.
+      // 그러면 재생 시간 표시도, 진행바도, seek 도 전부 죽는다 (실측 확인).
+      try {
+        const { size } = await stat(target);
+        const headers = new Headers(response.headers);
+        headers.set('Content-Length', String(size));
+        // Range 요청은 받지도 처리하지도 않는다 — 항상 전체 본문을 돌려준다.
+        // Accept-Ranges 를 광고하지 않는다 (실측: 헤더 유무와 무관하게 seek 은
+        // 이미 된다. 10.3절: 측정 없는 최적화는 하지 않는다).
+        return new Response(response.body, { status: response.status, headers });
+      } catch {
+        // 길이를 못 재도 재생 자체는 되게 둔다.
+        return response;
+      }
     });
   }
 

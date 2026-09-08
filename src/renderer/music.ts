@@ -20,21 +20,36 @@ export class MusicPlayer {
   private duck = 1.0;
   private fadeTimer: number | null = null;
   private stoppedByUser = false;
+  private failures = 0;
 
   constructor(private readonly onChange: (state: MusicState) => void) {
     this.audio.preload = 'auto';
     this.audio.addEventListener('ended', () => this.next());
     this.audio.addEventListener('timeupdate', () => this.report());
-    this.audio.addEventListener('loadedmetadata', () => this.report());
+    this.audio.addEventListener('loadedmetadata', () => {
+      this.failures = 0;
+      this.report();
+    });
     this.audio.addEventListener('error', () => {
-      // 파일이 사라졌거나 코덱을 못 읽는다. 멈추지 말고 다음 곡으로.
-      if (this.tracks.length > 1) this.next();
+      // 파일이 사라졌거나 코덱을 못 읽는다. 다음 곡으로 넘어가되,
+      // 한 바퀴를 다 돌도록 전부 실패하면 멈춘다 — CSP 나 경로 문제로
+      // 모든 곡이 막히면 재생목록을 무한히 돌게 된다.
+      this.failures += 1;
+      if (this.failures >= this.tracks.length || this.tracks.length <= 1) {
+        this.audio.pause();
+        this.report();
+        return;
+      }
+      this.next();
     });
   }
 
   setLibrary(tracks: Track[], startIndex: number, volume: number): void {
     this.tracks = tracks;
     this.index = Math.min(startIndex, Math.max(0, tracks.length - 1));
+    // 새 재생목록이다 — 앞 폴더에서 쌓인 실패 수는 의미가 없다. 안 지우면
+    // 폴더를 바꾼 직후 새 목록이 한 바퀴 돌기도 전에 멈출 수 있다.
+    this.failures = 0;
     this.userVolume = volume;
     this.applyVolume();
     this.report();
